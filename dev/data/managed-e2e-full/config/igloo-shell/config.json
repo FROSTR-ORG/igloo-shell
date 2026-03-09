@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "default_relay_profile_id": null,
+  "last_used_profile_id": "erin-1773045133",
+  "keyring_preference": "prefer_os_keyring",
+  "fallback_unlock_mode": "passphrase"
+}

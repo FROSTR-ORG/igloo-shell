@@ -1,0 +1,10 @@
+{
+  "id": "vault-1773045129-d927644e",
+  "kind": "share_package",
+  "source": "file_import",
+  "ciphertext_path": "dev/data/managed-e2e-full/data/igloo-shell/vault/vault-1773045129-d927644e.enc",
+  "key_source": "passphrase",
+  "salt_hex": "173e1b028ddf4510ae6abd231e8e51d9",
+  "created_at": 1773045129,
+  "updated_at": 1773045129
+}

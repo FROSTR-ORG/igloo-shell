@@ -1,0 +1,32 @@
+{
+  "id": "alice-1773079246",
+  "label": "alice",
+  "group_ref": "/home/cscott/Repos/frostr/frostr-infra/repos/igloo-shell/dev/data/devnet/data/igloo-shell/groups/1cda3f607a5a34bf5c88d7a769542da998bb5dce4f53142d5fd1366ed3a01996.json",
+  "share_ref": "vault-1773079246-672506f3",
+  "relay_profile": "local",
+  "runtime_options": null,
+  "policy_overrides": {
+    "default_policy": {
+      "block_all": false,
+      "request": {
+        "ecdh": true,
+        "echo": true,
+        "onboard": true,
+        "ping": true,
+        "sign": true
+      },
+      "respond": {
+        "ecdh": true,
+        "echo": true,
+        "onboard": true,
+        "ping": true,
+        "sign": true
+      }
+    },
+    "peer_overrides": []
+  },
+  "state_path": "/home/cscott/Repos/frostr/frostr-infra/repos/igloo-shell/dev/data/devnet/state/igloo-shell/profiles/alice-1773079246/signer-state.bin",
+  "daemon_socket_path": "/home/cscott/Repos/frostr/frostr-infra/repos/igloo-shell/dev/data/devnet/state/igloo-shell/profiles/alice-1773079246/daemon.sock",
+  "created_at": 1773079246,
+  "last_used_at": 1773079246
+}

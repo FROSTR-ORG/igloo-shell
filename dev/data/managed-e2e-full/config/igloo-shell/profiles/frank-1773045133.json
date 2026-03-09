@@ -1,0 +1,32 @@
+{
+  "id": "frank-1773045133",
+  "label": "frank",
+  "group_ref": "dev/data/managed-e2e-full/data/igloo-shell/groups/d27564aeb8847f4b08d2173880836edaf0c334cb35fe380a30a693328c416df8.json",
+  "share_ref": "vault-1773045133-642560b5",
+  "relay_profile": "local",
+  "runtime_options": null,
+  "policy_overrides": {
+    "default_policy": {
+      "block_all": false,
+      "request": {
+        "ecdh": true,
+        "echo": true,
+        "onboard": true,
+        "ping": true,
+        "sign": true
+      },
+      "respond": {
+        "ecdh": true,
+        "echo": true,
+        "onboard": true,
+        "ping": true,
+        "sign": true
+      }
+    },
+    "peer_overrides": []
+  },
+  "state_path": "dev/data/managed-e2e-full/state/igloo-shell/profiles/frank-1773045133/signer-state.bin",
+  "daemon_socket_path": "dev/data/managed-e2e-full/state/igloo-shell/profiles/frank-1773045133/daemon.sock",
+  "created_at": 1773045133,
+  "last_used_at": 1773045133
+}

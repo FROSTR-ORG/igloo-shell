@@ -1,0 +1,66 @@
+{
+  "group_pk": "d27564aeb8847f4b08d2173880836edaf0c334cb35fe380a30a693328c416df8",
+  "threshold": 11,
+  "members": [
+    {
+      "idx": 1,
+      "pubkey": "03c51934c0d558137820e528ae4c793ac670fae383b2d604e8f1b7f36aa7415ccd"
+    },
+    {
+      "idx": 2,
+      "pubkey": "036b4acebe6c2dc92bde64d789e7305a67ad57cc7bbeeeb137580e3228ab8c93e7"
+    },
+    {
+      "idx": 3,
+      "pubkey": "03d949ef8311aa4a4a1cee5dcf0c91f6e3d96fd269b3d1b905674b6ec162c539e1"
+    },
+    {
+      "idx": 4,
+      "pubkey": "0203672ec6672b6dea27f58031e56696dd419e961448ead1b2673e7fa9581c702f"
+    },
+    {
+      "idx": 5,
+      "pubkey": "0278af684808a865b1b1cafd077d113a93f74cc69f31fdae57521225953790782f"
+    },
+    {
+      "idx": 6,
+      "pubkey": "02f6f6c327aad6d35fe46bb50e57f3b5283159836fc5bb8e7f264385c2c7da6e7a"
+    },
+    {
+      "idx": 7,
+      "pubkey": "03cf1dabd918995042145a98833f3d95990c95c2e1904aa3e12512e3e5445cb15c"
+    },
+    {
+      "idx": 8,
+      "pubkey": "0391e41a636124f617df07ca089fe5ea2eeb226d82289230e845b383eaf990834e"
+    },
+    {
+      "idx": 9,
+      "pubkey": "0361feb4109abbbf38f7e1efde90c635303045049a6bc37fc913e252ebf48ceaa7"
+    },
+    {
+      "idx": 10,
+      "pubkey": "0225b211cce9e367ce98632a57eea68308150a34411ec69f44826e66cac9085d65"
+    },
+    {
+      "idx": 11,
+      "pubkey": "03f6037432d4b22ad893386c82047352a93e4070f26c22cc5ff7e41514ed39a2b5"
+    },
+    {
+      "idx": 12,
+      "pubkey": "020b5dfade5c1ac32c263d32cf2813281b6dfba8172d14d87b5d1ff89b7031f034"
+    },
+    {
+      "idx": 13,
+      "pubkey": "0213972d7730226cfcb8336282f055ad6fa87a13ba14936bc2c68cf7f4e867069c"
+    },
+    {
+      "idx": 14,
+      "pubkey": "027dba66f1fc43e7cc2bc23ce6381c1ed75bf2baee5cb0d2f0ac3a8345c5cc9fce"
+    },
+    {
+      "idx": 15,
+      "pubkey": "0344736e8b522a54f734edf144e39d8f87f61b05e0ea356833e783126786602d46"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+[package]
+name = "igloo-shell-cli"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["Christopher Scott"]
+
+[[bin]]
+name = "igloo-shell"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+nostr = { version = "0.44", features = ["std"] }
+bifrost-app = { path = "../../../bifrost-rs/crates/bifrost-app" }
+bifrost-core = { path = "../../../bifrost-rs/crates/bifrost-core" }
+igloo-shell-core = { path = "../igloo-shell-core" }

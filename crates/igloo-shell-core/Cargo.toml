@@ -1,0 +1,31 @@
+[package]
+name = "igloo-shell-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["Christopher Scott"]
+
+[dependencies]
+anyhow = "1"
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+crossterm = "0.29"
+futures-util = "0.3"
+hex = "0.4"
+k256 = { version = "0.13", features = ["schnorr"] }
+ratatui = "0.30"
+rand_core = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tracing = "0.1"
+bifrost-app = { path = "../../../bifrost-rs/crates/bifrost-app" }
+bifrost-codec = { path = "../../../bifrost-rs/crates/bifrost-codec" }
+bifrost-core = { path = "../../../bifrost-rs/crates/bifrost-core" }
+bifrost-signer = { path = "../../../bifrost-rs/crates/bifrost-signer" }
+frostr-utils = { path = "../../../bifrost-rs/crates/frostr-utils" }
+
+[dev-dependencies]
+bincode = "1"

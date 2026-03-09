@@ -1,0 +1,18 @@
+{
+  "group_pk": "7de6e5185c2a7ed837ac48b4419f96c7aca63d021ef9ae69366ef743ef9cac3c",
+  "threshold": 2,
+  "members": [
+    {
+      "idx": 1,
+      "pubkey": "03069eac59f99e7149e737793f63c9efdf17d98deb7fe4dbfc20f8474025152786"
+    },
+    {
+      "idx": 2,
+      "pubkey": "02dc9938b3c986163816c0c569f5906d1c5e698e754765acc32dfb2d4cebae3960"
+    },
+    {
+      "idx": 3,
+      "pubkey": "0248826e7807fee25200d869254a34c263d41e102ac0122f17f962bde92e0b9e44"
+    }
+  ]
+}
