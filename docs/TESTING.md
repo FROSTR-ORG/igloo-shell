@@ -10,6 +10,19 @@ cargo check --workspace --offline
 cargo test --workspace --offline
 ```
 
+PR-gated Rust coverage now includes:
+
+- public CLI onboarding-package integration coverage
+- managed runtime integration coverage for ping, peer onboarding, signing, ECDH, and invite lifecycle
+- live policy command coverage for manifest persistence and daemon-backed runtime updates
+
+Run those targets directly with:
+
+```bash
+cargo test -p igloo-shell-cli --test managed_integration --offline
+cargo test -p igloo-shell-cli --test policy_integration --offline
+```
+
 ## Scripted Runtime Checks
 
 ```bash
@@ -54,3 +67,17 @@ scripts/ws_soak.sh --iterations 25 --out dev/audit/work/evidence/ws-soak-$(date 
 cargo run -p igloo-shell-cli --offline -- dev e2e-node --out-dir ./dev/data --relay ws://127.0.0.1:8194
 cargo run -p igloo-shell-cli --offline -- dev e2e-full --threshold 11 --count 15
 ```
+
+The heavy `11-of-15` managed stress regression is also available as an ignored Rust test for
+nightly/manual CI:
+
+```bash
+cargo test -p igloo-shell-cli --test managed_stress --offline -- --ignored
+```
+
+`dev e2e-full` now covers:
+
+- managed profile provisioning and daemon startup
+- peer discovery, pinging, and onboarding
+- policy set-default / set-peer / clear-peer round trips
+- repeated signing and ECDH iterations

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::fs;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
