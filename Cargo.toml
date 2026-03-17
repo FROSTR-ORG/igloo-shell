@@ -2,6 +2,5 @@
 members = [
     "crates/igloo-shell-core",
     "crates/igloo-shell-cli",
-    "crates/igloo-shell-tui",
 ]
 resolver = "2"

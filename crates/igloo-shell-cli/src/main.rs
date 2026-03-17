@@ -1,22 +1,29 @@
+use std::fs;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{IsTerminal, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use bifrost_app::host::{ControlCommand, LogOptions, init_tracing, run_resolved_daemon};
-use bifrost_core::types::PeerPolicy;
-use clap::{Args, Parser, Subcommand};
+use bifrost_core::types::PolicyOverrideValue;
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use crossterm::event::{Event, KeyCode, KeyEventKind, read};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use igloo_shell_core::shell::{
-    RelayProfile, SetupRequest, ShellPaths, add_relays, daemon_log_path, daemon_runtime_query,
-    doctor_profile, export_profile, import_profile_from_files,
-    import_profile_from_onboarding_package, import_profile_from_onboarding_value, list_profiles, load_relay_profiles,
-    load_shell_config, read_daemon_metadata, read_profile, remove_profile, remove_relays,
-    replace_relay_profile, resolve_profile_runtime, run_setup, set_default_relay_profile,
-    clear_profile_peer_policy, set_profile_default_policy, set_profile_peer_policy,
-    start_profile_daemon, stop_profile_daemon, test_relay_connectivity,
+    RelayProfile, SetupRequest, ShellCheckKind, ShellPaths, add_relays, check_profile_runtime,
+    clear_profile_peer_policy, create_generated_keyset_draft, daemon_log_path,
+    daemon_runtime_query, doctor_profile, export_generated_onboarding_package, export_profile,
+    export_profile_as_bfprofile, export_profile_as_bfonboard, export_profile_as_bfshare,
+    import_generated_share, import_profile_from_bfprofile_value, import_profile_from_files,
+    import_profile_from_onboarding_value, list_profiles, load_relay_profiles, load_shell_config,
+    publish_profile_backup, read_daemon_metadata, read_profile, recover_profile_from_bfshare_value,
+    remove_profile, remove_relays, replace_relay_profile, resolve_profile_runtime, run_setup,
+    set_default_relay_profile, set_profile_default_policy_override, set_profile_peer_policy_override,
+    start_profile_daemon, stop_profile_daemon, test_relay_connectivity, PolicyDirection,
+    PolicyMethod,
 };
-use igloo_shell_core::{e2e, invite, keygen, relay, tui};
+use igloo_shell_core::tui;
 use nostr::{FromBech32, Keys, PublicKey, SecretKey, ToBech32};
 use serde::Serialize;
 
@@ -40,6 +47,11 @@ struct TraceArgs {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    Import(ImportArgs),
+    Export(ExportArgs),
+    Recover(RecoverArgs),
+    Onboard(OnboardArgs),
+    Keygen(KeygenArgs),
     Setup(SetupArgs),
     Profile {
         #[command(subcommand)]
@@ -53,13 +65,13 @@ enum Commands {
         #[command(subcommand)]
         command: RuntimeCommands,
     },
+    Check {
+        #[command(subcommand)]
+        command: CheckCommands,
+    },
     Peer {
         #[command(subcommand)]
         command: PeerCommands,
-    },
-    Invite {
-        #[command(subcommand)]
-        command: InviteCommands,
     },
     Policy {
         #[command(subcommand)]
@@ -73,14 +85,6 @@ enum Commands {
         #[command(subcommand)]
         command: KeyCommands,
     },
-    Tui {
-        #[arg(long)]
-        profile: Option<String>,
-    },
-    Dev {
-        #[command(subcommand)]
-        command: DevCommands,
-    },
     #[command(hide = true, name = "__daemon-run")]
     DaemonRun(DaemonRunArgs),
 }
@@ -91,11 +95,9 @@ enum ProfileCommands {
     Show {
         profile_id: String,
     },
-    Import(ProfileImportArgs),
-    Export {
+    Load(LoadArgs),
+    Backup {
         profile_id: String,
-        #[arg(long)]
-        out_dir: String,
         #[arg(long)]
         vault_passphrase_env: Option<String>,
     },
@@ -145,14 +147,6 @@ enum RuntimeCommands {
         #[arg(long)]
         profile: String,
     },
-    Readiness {
-        #[arg(long)]
-        profile: String,
-    },
-    ExplainReadiness {
-        #[arg(long)]
-        profile: String,
-    },
     Ops {
         #[arg(long)]
         profile: String,
@@ -176,6 +170,22 @@ enum RuntimeCommands {
 }
 
 #[derive(Debug, Subcommand)]
+enum CheckCommands {
+    Onboard {
+        #[arg(long)]
+        profile: String,
+    },
+    Sign {
+        #[arg(long)]
+        profile: String,
+    },
+    Ecdh {
+        #[arg(long)]
+        profile: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum PeerCommands {
     List {
         #[arg(long)]
@@ -190,53 +200,118 @@ enum PeerCommands {
         #[arg(long)]
         profile: String,
         peer_pubkey: String,
-        #[arg(long)]
-        challenge_hex32: Option<String>,
     },
 }
 
-#[derive(Debug, Subcommand)]
-enum InviteCommands {
-    Create {
-        #[arg(long)]
-        profile: String,
-        #[arg(long = "relay")]
-        relay_overrides: Vec<String>,
-        #[arg(long, default_value_t = 3600)]
-        expires_in_secs: u64,
-        #[arg(long)]
-        label: Option<String>,
-    },
-    List {
-        #[arg(long)]
-        profile: String,
-    },
-    Show {
-        #[arg(long)]
-        profile: String,
-        challenge_hex32: String,
-    },
-    Revoke {
-        #[arg(long)]
-        profile: String,
-        challenge_hex32: String,
-    },
-    Assemble {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    Accept {
-        package: String,
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    Import {
-        package_or_path: String,
-        #[arg(long)]
-        label: Option<String>,
-        #[arg(long = "relay-profile")]
-        relay_profile: Option<String>,
-    },
+#[derive(Debug, Args)]
+struct OnboardArgs {
+    package_or_path: String,
+    #[arg(long, conflicts_with = "onboard_secret_file")]
+    onboard_secret: Option<String>,
+    #[arg(long, conflicts_with = "onboard_secret")]
+    onboard_secret_file: Option<String>,
+    #[arg(long, conflicts_with = "vault_secret_file")]
+    vault_secret: Option<String>,
+    #[arg(long, conflicts_with = "vault_secret")]
+    vault_secret_file: Option<String>,
+    #[arg(long)]
+    label: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct LoadArgs {
+    profile_id: Option<String>,
+    #[arg(long, conflicts_with = "vault_secret_file")]
+    vault_secret: Option<String>,
+    #[arg(long, conflicts_with = "vault_secret")]
+    vault_secret_file: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct ImportArgs {
+    bfprofile_or_path: Option<String>,
+    #[arg(long)]
+    group: Option<String>,
+    #[arg(long)]
+    share: Option<String>,
+    #[arg(long = "relay-profile")]
+    relay_profile: Option<String>,
+    #[arg(long = "relay")]
+    relays: Vec<String>,
+    #[arg(long, conflicts_with = "package_secret_file")]
+    package_secret: Option<String>,
+    #[arg(long, conflicts_with = "package_secret")]
+    package_secret_file: Option<String>,
+    #[arg(long)]
+    label: Option<String>,
+    #[arg(long, conflicts_with = "vault_secret_file")]
+    vault_secret: Option<String>,
+    #[arg(long, conflicts_with = "vault_secret")]
+    vault_secret_file: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ExportArgs {
+    profile_id: String,
+    #[arg(long)]
+    out: String,
+    #[arg(long, default_value = "raw")]
+    format: String,
+    #[arg(long)]
+    recipient_share: Option<String>,
+    #[arg(long = "relay-url")]
+    relay_urls: Vec<String>,
+    #[arg(long)]
+    vault_passphrase_env: Option<String>,
+    #[arg(long)]
+    package_password_env: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct RecoverArgs {
+    bfshare_or_path: String,
+    #[arg(long)]
+    label: Option<String>,
+    #[arg(long, conflicts_with = "package_secret_file")]
+    package_secret: Option<String>,
+    #[arg(long, conflicts_with = "package_secret")]
+    package_secret_file: Option<String>,
+    #[arg(long, conflicts_with = "vault_secret_file")]
+    vault_secret: Option<String>,
+    #[arg(long, conflicts_with = "vault_secret")]
+    vault_secret_file: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct KeygenArgs {
+    #[arg(long)]
+    keyset_name: Option<String>,
+    #[arg(long)]
+    threshold: Option<u16>,
+    #[arg(long)]
+    count: Option<u16>,
+    #[arg(long)]
+    member_index: Option<u16>,
+    #[arg(long)]
+    label: Option<String>,
+    #[arg(long = "relay-url")]
+    relay_urls: Vec<String>,
+    #[arg(long, conflicts_with = "vault_secret_file")]
+    vault_secret: Option<String>,
+    #[arg(long, conflicts_with = "vault_secret")]
+    vault_secret_file: Option<String>,
+    #[arg(long, conflicts_with = "distribution_secret_file")]
+    distribution_secret: Option<String>,
+    #[arg(long, conflicts_with = "distribution_secret")]
+    distribution_secret_file: Option<String>,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -245,22 +320,26 @@ enum PolicyCommands {
         #[arg(long)]
         profile: String,
     },
-    SetDefault {
+    SetDefaultOverride {
         #[arg(long)]
         profile: String,
         #[arg(long)]
-        send: String,
+        direction: CliPolicyDirection,
         #[arg(long)]
-        receive: String,
+        method: CliPolicyMethod,
+        #[arg(long)]
+        value: CliPolicyValue,
     },
-    SetPeer {
+    SetPeerOverride {
         #[arg(long)]
         profile: String,
         peer_pubkey: String,
         #[arg(long)]
-        send: String,
+        direction: CliPolicyDirection,
         #[arg(long)]
-        receive: String,
+        method: CliPolicyMethod,
+        #[arg(long)]
+        value: CliPolicyValue,
     },
     ClearPeer {
         #[arg(long)]
@@ -298,14 +377,33 @@ struct RelayMutateArgs {
     relays: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliPolicyDirection {
+    Request,
+    Respond,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliPolicyMethod {
+    Ping,
+    Onboard,
+    Sign,
+    Ecdh,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliPolicyValue {
+    Unset,
+    Allow,
+    Deny,
+}
+
 #[derive(Debug, Args)]
 struct SetupArgs {
     #[arg(long)]
     group: Option<String>,
     #[arg(long)]
     share: Option<String>,
-    #[arg(long = "onboarding-package")]
-    onboarding_package: Option<String>,
     #[arg(long)]
     label: Option<String>,
     #[arg(long = "relay-profile")]
@@ -314,30 +412,8 @@ struct SetupArgs {
     relays: Vec<String>,
     #[arg(long)]
     vault_passphrase_env: Option<String>,
-    #[arg(long)]
-    onboarding_password_env: Option<String>,
     #[arg(long)]
     start_daemon: bool,
-}
-
-#[derive(Debug, Args)]
-struct ProfileImportArgs {
-    #[arg(long)]
-    group: Option<String>,
-    #[arg(long)]
-    share: Option<String>,
-    #[arg(long = "onboarding-package")]
-    onboarding_package: Option<String>,
-    #[arg(long)]
-    label: Option<String>,
-    #[arg(long = "relay-profile")]
-    relay_profile: Option<String>,
-    #[arg(long = "relay")]
-    relays: Vec<String>,
-    #[arg(long)]
-    vault_passphrase_env: Option<String>,
-    #[arg(long)]
-    onboarding_password_env: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -347,26 +423,6 @@ enum KeyCommands {
         from: String,
         #[arg(long)]
         value: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum DevCommands {
-    Keygen {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    Relay {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    E2eNode {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    E2eFull {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
     },
 }
 
@@ -388,19 +444,20 @@ async fn main() -> Result<()> {
     let paths = ShellPaths::resolve()?;
 
     match cli.command {
+        Commands::Import(args) => handle_import(&paths, args).await?,
+        Commands::Export(args) => handle_export(&paths, args)?,
+        Commands::Recover(args) => handle_recover(&paths, args).await?,
+        Commands::Onboard(args) => handle_onboard(&paths, args).await?,
+        Commands::Keygen(args) => handle_keygen(&paths, args).await?,
         Commands::Setup(args) => handle_setup(&paths, args).await?,
         Commands::Profile { command } => handle_profile(&paths, command).await?,
         Commands::Daemon { command } => handle_daemon(&paths, command).await?,
         Commands::Runtime { command } => handle_runtime(&paths, command).await?,
+        Commands::Check { command } => handle_check(&paths, command).await?,
         Commands::Peer { command } => handle_peer(&paths, command).await?,
-        Commands::Invite { command } => handle_invite(&paths, command).await?,
         Commands::Policy { command } => handle_policy(&paths, command).await?,
         Commands::Relays { command } => handle_relays(&paths, command).await?,
         Commands::Keys { command } => handle_keys(command)?,
-        Commands::Tui { profile } => {
-            tui::run_tui(&paths, profile).await?;
-        }
-        Commands::Dev { command } => handle_dev(command).await?,
         Commands::DaemonRun(args) => handle_daemon_run(&paths, args).await?,
     }
 
@@ -417,18 +474,14 @@ async fn handle_profile(paths: &ShellPaths, command: ProfileCommands) -> Result<
             let profile = read_profile(paths, &profile_id)?;
             print_json(&profile)
         }
-        ProfileCommands::Import(args) => handle_profile_import(paths, args).await,
-        ProfileCommands::Export {
+        ProfileCommands::Load(args) => handle_load(paths, args).await,
+        ProfileCommands::Backup {
             profile_id,
-            out_dir,
             vault_passphrase_env,
         } => {
-            let result = export_profile(
-                paths,
-                &profile_id,
-                std::path::Path::new(&out_dir),
-                load_secret_from_env(vault_passphrase_env)?,
-            )?;
+            let result =
+                publish_profile_backup(paths, &profile_id, load_secret_from_env(vault_passphrase_env)?)
+                    .await?;
             print_json(&result)
         }
         ProfileCommands::Remove { profile_id, yes } => {
@@ -449,18 +502,315 @@ async fn handle_profile(paths: &ShellPaths, command: ProfileCommands) -> Result<
     }
 }
 
+async fn handle_load(paths: &ShellPaths, args: LoadArgs) -> Result<()> {
+    let profile_id = match args.profile_id {
+        Some(profile_id) => {
+            let _ = read_profile(paths, &profile_id)?;
+            profile_id
+        }
+        None => prompt_select_profile(paths)?,
+    };
+    let vault_secret = resolve_secret_source_with(
+        args.vault_secret,
+        args.vault_secret_file,
+        std::io::stdin().is_terminal(),
+        "vault-secret",
+        "profile load requires vault secret input; use --vault-secret / --vault-secret-file, or run on a TTY",
+        prompt_load_vault_secret,
+    )?;
+    launch_dashboard(paths, profile_id, vault_secret).await
+}
+
+async fn handle_import(paths: &ShellPaths, args: ImportArgs) -> Result<()> {
+    let label = resolve_profile_label(args.label)?;
+    let vault_secret = resolve_secret_source_with(
+        args.vault_secret,
+        args.vault_secret_file,
+        std::io::stdin().is_terminal(),
+        "vault-secret",
+        "import requires vault secret input; use --vault-secret / --vault-secret-file, or run on a TTY",
+        prompt_vault_secret,
+    )?;
+    let relay_profile = if args.bfprofile_or_path.is_none() {
+        ensure_relay_profile(
+            paths,
+            args.relay_profile.clone(),
+            Some(label.as_str()),
+            &args.relays,
+        )?
+    } else {
+        args.relay_profile.clone()
+    };
+    let import = match (args.group, args.share, args.bfprofile_or_path) {
+        (Some(group), Some(share), None) => import_profile_from_files(
+            paths,
+            std::path::Path::new(&group),
+            std::path::Path::new(&share),
+            Some(label.clone()),
+            relay_profile,
+            Some(vault_secret.clone()),
+        )?,
+        (None, None, Some(package_or_path)) => {
+            let package_raw = read_package_or_inline(&package_or_path)?;
+            let package_secret = resolve_package_secret(
+                args.package_secret,
+                args.package_secret_file,
+                "import requires package secret input; use --package-secret / --package-secret-file, or run on a TTY",
+            )?;
+            import_profile_from_bfprofile_value(
+                paths,
+                &package_raw,
+                package_secret,
+                Some(label.clone()),
+                relay_profile,
+                Some(vault_secret.clone()),
+            )?
+        }
+        _ => bail!("import requires either <bfprofile-or-path> or both --group and --share"),
+    };
+    if let Ok(profile) = result_profile(&import) {
+        if let Err(err) = publish_profile_backup(paths, &profile.id, None).await {
+            eprintln!("warning: failed to publish encrypted profile backup: {err}");
+        }
+        if args.json {
+            return print_json(&serde_json::json!({
+                "import": import,
+                "next": {
+                    "load": format!("igloo-shell profile load {}", profile.id),
+                }
+            }));
+        }
+        println!("Import complete. Launching dashboard for profile {}.", profile.id);
+        return launch_dashboard(paths, profile.id.clone(), vault_secret).await;
+    }
+    print_json(&import)
+}
+
+fn handle_export(paths: &ShellPaths, args: ExportArgs) -> Result<()> {
+    let vault_passphrase = load_secret_from_env(args.vault_passphrase_env)?;
+    let result = match args.format.as_str() {
+        "raw" => serde_json::to_value(export_profile(
+            paths,
+            &args.profile_id,
+            std::path::Path::new(&args.out),
+            vault_passphrase,
+        )?)?,
+        "bfprofile" => serde_json::to_value(export_profile_as_bfprofile(
+            paths,
+            &args.profile_id,
+            require_env_secret(args.package_password_env, "package password")?,
+            vault_passphrase,
+            Some(std::path::Path::new(&args.out)),
+        )?)?,
+        "bfshare" => serde_json::to_value(export_profile_as_bfshare(
+            paths,
+            &args.profile_id,
+            require_env_secret(args.package_password_env, "package password")?,
+            vault_passphrase,
+            Some(std::path::Path::new(&args.out)),
+        )?)?,
+        "bfonboard" => serde_json::to_value(export_profile_as_bfonboard(
+            paths,
+            &args.profile_id,
+            std::path::Path::new(
+                &args
+                    .recipient_share
+                    .ok_or_else(|| anyhow!("--recipient-share is required for --format bfonboard"))?,
+            ),
+            if args.relay_urls.is_empty() {
+                None
+            } else {
+                Some(args.relay_urls)
+            },
+            require_env_secret(args.package_password_env, "package password")?,
+            vault_passphrase,
+            Some(std::path::Path::new(&args.out)),
+        )?)?,
+        _ => bail!(
+            "unsupported profile export format {}; expected raw, bfprofile, bfshare, or bfonboard",
+            args.format
+        ),
+    };
+    print_json(&result)
+}
+
+async fn handle_recover(paths: &ShellPaths, args: RecoverArgs) -> Result<()> {
+    let package_raw = read_package_or_inline(&args.bfshare_or_path)?;
+    let label = resolve_profile_label(args.label)?;
+    let package_secret = resolve_package_secret(
+        args.package_secret,
+        args.package_secret_file,
+        "recover requires package secret input; use --package-secret / --package-secret-file, or run on a TTY",
+    )?;
+    let vault_secret = resolve_secret_source_with(
+        args.vault_secret,
+        args.vault_secret_file,
+        std::io::stdin().is_terminal(),
+        "vault-secret",
+        "recover requires vault secret input; use --vault-secret / --vault-secret-file, or run on a TTY",
+        prompt_vault_secret,
+    )?;
+    let import = recover_profile_from_bfshare_value(
+        paths,
+        &package_raw,
+        package_secret,
+        Some(label),
+        None,
+        Some(vault_secret.clone()),
+    )
+    .await?;
+    if let Ok(profile) = result_profile(&import) {
+        if let Err(err) = publish_profile_backup(paths, &profile.id, None).await {
+            eprintln!("warning: failed to publish encrypted profile backup: {err}");
+        }
+        if args.json {
+            return print_json(&serde_json::json!({
+                "import": import,
+                "next": {
+                    "load": format!("igloo-shell profile load {}", profile.id),
+                }
+            }));
+        }
+        println!("Recovery complete. Launching dashboard for profile {}.", profile.id);
+        return launch_dashboard(paths, profile.id.clone(), vault_secret).await;
+    }
+    print_json(&import)
+}
+
+async fn handle_keygen(paths: &ShellPaths, args: KeygenArgs) -> Result<()> {
+    let stdin_is_terminal = std::io::stdin().is_terminal();
+    let keyset_name = resolve_required_text(
+        args.keyset_name,
+        stdin_is_terminal,
+        "keygen requires --keyset-name when stdin is not a TTY",
+        prompt_keyset_name,
+    )?;
+    let threshold = resolve_u16_input(
+        args.threshold,
+        stdin_is_terminal,
+        "threshold",
+        "keygen requires --threshold when stdin is not a TTY",
+        prompt_threshold,
+    )?;
+    let count = resolve_u16_input(
+        args.count,
+        stdin_is_terminal,
+        "count",
+        "keygen requires --count when stdin is not a TTY",
+        prompt_count,
+    )?;
+    let draft = create_generated_keyset_draft(keyset_name, threshold, count)?;
+    let member_index = resolve_member_index(
+        args.member_index,
+        &draft,
+        stdin_is_terminal,
+        "keygen requires --member-index when stdin is not a TTY",
+    )?;
+    let default_label = draft
+        .shares
+        .iter()
+        .find(|share| share.member_idx == member_index)
+        .map(|share| share.label.clone());
+    let label = resolve_required_text(
+        args.label.or(default_label),
+        stdin_is_terminal,
+        "keygen requires --label when stdin is not a TTY",
+        prompt_profile_label,
+    )?;
+    let relay_urls = resolve_keygen_relays(args.relay_urls, stdin_is_terminal)?;
+    let vault_secret = resolve_secret_source_with(
+        args.vault_secret,
+        args.vault_secret_file,
+        stdin_is_terminal,
+        "vault-secret",
+        "keygen requires vault secret input; use --vault-secret / --vault-secret-file, or run on a TTY",
+        prompt_vault_secret,
+    )?;
+    let distribution_secret = resolve_secret_source_with(
+        args.distribution_secret,
+        args.distribution_secret_file,
+        stdin_is_terminal,
+        "distribution-secret",
+        "keygen requires onboarding package secret input; use --distribution-secret / --distribution-secret-file, or run on a TTY",
+        prompt_distribution_secret,
+    )?;
+    let import = import_generated_share(
+        paths,
+        &draft,
+        member_index,
+        label,
+        relay_urls.clone(),
+        Some(vault_secret.clone()),
+    )?;
+    let profile = result_profile(&import)?.clone();
+    if let Err(err) = publish_profile_backup(paths, &profile.id, None).await {
+        eprintln!("warning: failed to publish encrypted profile backup: {err}");
+    }
+    let export_root = paths
+        .state_dir
+        .join("generated-onboarding")
+        .join(&profile.id);
+    fs::create_dir_all(&export_root)
+        .with_context(|| format!("create {}", export_root.display()))?;
+    let selected_share = draft
+        .shares
+        .iter()
+        .find(|share| share.member_idx == member_index)
+        .ok_or_else(|| anyhow!("generated share {member_index} not found"))?;
+    let mut packages = Vec::new();
+    for share in &draft.shares {
+        if share.member_idx == member_index {
+            continue;
+        }
+        let package = export_generated_onboarding_package(
+            &draft,
+            share.member_idx,
+            relay_urls.clone(),
+            selected_share.share_public_key.clone(),
+            distribution_secret.clone(),
+        )?;
+        let path = export_root.join(format!("member-{}.bfonboard.txt", share.member_idx));
+        fs::write(&path, &package)
+            .with_context(|| format!("write {}", path.display()))?;
+        packages.push(serde_json::json!({
+            "member_idx": share.member_idx,
+            "label": share.label,
+            "path": path.display().to_string(),
+        }));
+    }
+    if args.json {
+        return print_json(&serde_json::json!({
+            "import": import,
+            "generated_packages": packages,
+            "next": {
+                "load": format!("igloo-shell profile load {}", profile.id),
+            }
+        }));
+    }
+    println!(
+        "Keyset generated. Saved onboarding packages for the remaining members under {}.",
+        export_root.display()
+    );
+    launch_dashboard(paths, profile.id.clone(), vault_secret).await
+}
+
 async fn handle_setup(paths: &ShellPaths, args: SetupArgs) -> Result<()> {
-    let relay_profile = ensure_relay_profile(paths, args.relay_profile, args.label.as_deref(), &args.relays)?;
+    let relay_profile = ensure_relay_profile(
+        paths,
+        args.relay_profile,
+        args.label.as_deref(),
+        &args.relays,
+    )?;
     let result = run_setup(
         paths,
         SetupRequest {
             group_path: args.group.map(Into::into),
             share_path: args.share.map(Into::into),
-            onboarding_package_path: args.onboarding_package.map(Into::into),
+            onboarding_package_path: None,
             label: args.label,
             relay_profile,
             vault_passphrase: load_secret_from_env(args.vault_passphrase_env)?,
-            onboarding_password: load_secret_from_env(args.onboarding_password_env)?,
+            onboarding_password: None,
         },
         args.start_daemon,
     )
@@ -468,34 +818,34 @@ async fn handle_setup(paths: &ShellPaths, args: SetupArgs) -> Result<()> {
     print_json(&result)
 }
 
-async fn handle_profile_import(paths: &ShellPaths, args: ProfileImportArgs) -> Result<()> {
-    let vault_passphrase = load_secret_from_env(args.vault_passphrase_env)?;
-    let onboarding_password = load_secret_from_env(args.onboarding_password_env)?;
-    let relay_profile = ensure_relay_profile(paths, args.relay_profile, args.label.as_deref(), &args.relays)?;
-    let result = match (args.group, args.share, args.onboarding_package) {
-        (Some(group), Some(share), None) => import_profile_from_files(
-            paths,
-            std::path::Path::new(&group),
-            std::path::Path::new(&share),
-            args.label,
-            relay_profile,
-            vault_passphrase,
-        )?,
-        (None, None, Some(package)) => {
-            import_profile_from_onboarding_package(
-                paths,
-                std::path::Path::new(&package),
-                args.label,
-                relay_profile,
-                vault_passphrase,
-                onboarding_password,
-            )
-            .await?
-        }
-        _ => bail!("profile import requires either --group and --share, or --onboarding-package"),
-    };
+async fn handle_onboard(paths: &ShellPaths, args: OnboardArgs) -> Result<()> {
+    let package_raw = read_package_or_inline(&args.package_or_path)?;
+    let label = resolve_profile_label(args.label)?;
+    let onboarding_secret = resolve_onboard_secret(args.onboard_secret, args.onboard_secret_file)?;
+    let vault_secret = resolve_vault_secret(args.vault_secret, args.vault_secret_file)?;
+    let import = import_profile_from_onboarding_value(
+        paths,
+        &package_raw,
+        Some(label),
+        None,
+        Some(vault_secret.clone()),
+        Some(onboarding_secret),
+    )
+    .await?;
+    let profile = result_profile(&import)?;
+    let profile_id = profile.id.clone();
 
-    print_json(&result)
+    if args.json {
+        print_json(&serde_json::json!({
+            "import": import,
+            "next": {
+                "load": format!("igloo-shell profile load {}", profile_id),
+            }
+        }))
+    } else {
+        println!("Onboarding complete. Launching dashboard for profile {profile_id}.");
+        launch_dashboard(paths, profile_id, vault_secret).await
+    }
 }
 
 async fn handle_daemon(paths: &ShellPaths, command: DaemonCommands) -> Result<()> {
@@ -524,7 +874,9 @@ async fn handle_daemon(paths: &ShellPaths, command: DaemonCommands) -> Result<()
         DaemonCommands::Status { profile } => {
             if let Some(profile_id) = profile {
                 let metadata = read_daemon_metadata(paths, &profile_id)?;
-                let runtime = daemon_runtime_query(paths, &profile_id, ControlCommand::RuntimeMetadata).await?;
+                let runtime =
+                    daemon_runtime_query(paths, &profile_id, ControlCommand::RuntimeMetadata)
+                        .await?;
                 print_json(&serde_json::json!({
                     "profile": profile_id,
                     "metadata": metadata,
@@ -560,7 +912,8 @@ async fn handle_daemon(paths: &ShellPaths, command: DaemonCommands) -> Result<()
 async fn handle_runtime(paths: &ShellPaths, command: RuntimeCommands) -> Result<()> {
     match command {
         RuntimeCommands::Status { profile } => {
-            let status = daemon_runtime_query(paths, &profile, ControlCommand::RuntimeStatus).await?;
+            let status =
+                daemon_runtime_query(paths, &profile, ControlCommand::RuntimeStatus).await?;
             print_json(&status)
         }
         RuntimeCommands::Diagnostics { profile } => {
@@ -568,17 +921,9 @@ async fn handle_runtime(paths: &ShellPaths, command: RuntimeCommands) -> Result<
                 daemon_runtime_query(paths, &profile, ControlCommand::RuntimeDiagnostics).await?;
             print_json(&diagnostics)
         }
-        RuntimeCommands::Readiness { profile } => {
-            let readiness = daemon_runtime_query(paths, &profile, ControlCommand::Readiness).await?;
-            print_json(&readiness)
-        }
-        RuntimeCommands::ExplainReadiness { profile } => {
-            let explanation =
-                daemon_runtime_query(paths, &profile, ControlCommand::ReadinessExplain).await?;
-            print_json(&explanation)
-        }
         RuntimeCommands::Ops { profile } => {
-            let metadata = daemon_runtime_query(paths, &profile, ControlCommand::RuntimeMetadata).await?;
+            let metadata =
+                daemon_runtime_query(paths, &profile, ControlCommand::RuntimeMetadata).await?;
             print_json(&serde_json::json!({
                 "profile": profile,
                 "runtime_metadata": metadata,
@@ -624,6 +969,21 @@ async fn handle_runtime(paths: &ShellPaths, command: RuntimeCommands) -> Result<
     }
 }
 
+async fn handle_check(paths: &ShellPaths, command: CheckCommands) -> Result<()> {
+    let result = match command {
+        CheckCommands::Onboard { profile } => {
+            check_profile_runtime(paths, &profile, ShellCheckKind::Onboard).await?
+        }
+        CheckCommands::Sign { profile } => {
+            check_profile_runtime(paths, &profile, ShellCheckKind::Sign).await?
+        }
+        CheckCommands::Ecdh { profile } => {
+            check_profile_runtime(paths, &profile, ShellCheckKind::Ecdh).await?
+        }
+    };
+    print_json(&result)
+}
+
 async fn handle_peer(paths: &ShellPaths, command: PeerCommands) -> Result<()> {
     match command {
         PeerCommands::List { profile } => {
@@ -648,7 +1008,6 @@ async fn handle_peer(paths: &ShellPaths, command: PeerCommands) -> Result<()> {
         PeerCommands::Onboard {
             profile,
             peer_pubkey,
-            challenge_hex32,
         } => {
             let result = daemon_runtime_query(
                 paths,
@@ -656,101 +1015,7 @@ async fn handle_peer(paths: &ShellPaths, command: PeerCommands) -> Result<()> {
                 ControlCommand::Onboard {
                     peer: peer_pubkey,
                     timeout_secs: None,
-                    challenge_hex32,
                 },
-            )
-            .await?;
-            print_json(&result)
-        }
-    }
-}
-
-async fn handle_invite(paths: &ShellPaths, command: InviteCommands) -> Result<()> {
-    match command {
-        InviteCommands::Assemble { args } => invite::run_invite_command(&with_subcommand("assemble", args)),
-        InviteCommands::Accept { package, args } => {
-            invite::run_invite_command(&with_leading_arg("accept", package, args))
-        }
-        InviteCommands::Import {
-            package_or_path,
-            label,
-            relay_profile,
-        } => {
-            let result = if std::path::Path::new(&package_or_path).exists() {
-                import_profile_from_onboarding_package(
-                    paths,
-                    std::path::Path::new(&package_or_path),
-                    label,
-                    relay_profile,
-                    None,
-                    None,
-                )
-                .await?
-            } else {
-                import_profile_from_onboarding_value(
-                    paths,
-                    &package_or_path,
-                    label,
-                    relay_profile,
-                    None,
-                    None,
-                )
-                .await?
-            };
-            print_json(&result)
-        }
-        InviteCommands::Create {
-            profile,
-            relay_overrides,
-            expires_in_secs,
-            label,
-        } => {
-            let result = daemon_runtime_query(
-                paths,
-                &profile,
-                ControlCommand::InviteCreate {
-                    relay_overrides,
-                    expires_in_secs,
-                    label,
-                },
-            )
-            .await?;
-            print_json(&result)
-        }
-        InviteCommands::List { profile } => {
-            let result =
-                daemon_runtime_query(paths, &profile, ControlCommand::InviteList).await?;
-            print_json(&result)
-        }
-        InviteCommands::Show {
-            profile,
-            challenge_hex32,
-        } => {
-            let invites =
-                daemon_runtime_query(paths, &profile, ControlCommand::InviteList).await?;
-            let entries = invites
-                .as_array()
-                .ok_or_else(|| anyhow!("daemon returned invalid invite list"))?;
-            let invite = entries
-                .iter()
-                .find(|entry| {
-                    entry
-                        .get("challenge_hex")
-                        .and_then(serde_json::Value::as_str)
-                        == Some(challenge_hex32.as_str())
-                })
-                .cloned()
-                .ok_or_else(|| anyhow!("unknown invite challenge {challenge_hex32}"))?;
-            print_json(&invite)
-        }
-        InviteCommands::Revoke {
-            profile,
-            challenge_hex32,
-        } => {
-            let result = daemon_runtime_query(
-                paths,
-                &profile,
-                ControlCommand::InviteRevoke { challenge_hex32 },
             )
             .await?;
             print_json(&result)
@@ -761,16 +1026,27 @@ async fn handle_invite(paths: &ShellPaths, command: InviteCommands) -> Result<()
 async fn handle_policy(paths: &ShellPaths, command: PolicyCommands) -> Result<()> {
     match command {
         PolicyCommands::Show { profile } => {
-            let result = daemon_runtime_query(paths, &profile, ControlCommand::Policies).await?;
-            print_json(&result)
+            let result =
+                daemon_runtime_query(paths, &profile, ControlCommand::RuntimeStatus).await?;
+            let policies = result
+                .get("peer_permission_states")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([]));
+            print_json(&policies)
         }
-        PolicyCommands::SetDefault {
+        PolicyCommands::SetDefaultOverride {
             profile,
-            send,
-            receive,
+            direction,
+            method,
+            value,
         } => {
-            let policy = send_receive_policy(&send, &receive)?;
-            let profile = set_profile_default_policy(paths, &profile, policy)?;
+            let profile = set_profile_default_policy_override(
+                paths,
+                &profile,
+                policy_direction(direction),
+                policy_method(method),
+                policy_value(value),
+            )?;
             print_json(&serde_json::json!({
                 "updated": true,
                 "profile": profile.id,
@@ -778,21 +1054,28 @@ async fn handle_policy(paths: &ShellPaths, command: PolicyCommands) -> Result<()
                 "manifest": profile,
             }))
         }
-        PolicyCommands::SetPeer {
+        PolicyCommands::SetPeerOverride {
             profile,
             peer_pubkey,
-            send,
-            receive,
+            direction,
+            method,
+            value,
         } => {
-            let policy = send_receive_policy(&send, &receive)?;
-            let manifest = set_profile_peer_policy(paths, &profile, &peer_pubkey, policy.clone())?;
+            let (manifest, effective_override) = set_profile_peer_policy_override(
+                paths,
+                &profile,
+                &peer_pubkey,
+                policy_direction(direction),
+                policy_method(method),
+                policy_value(value),
+            )?;
             let result = daemon_runtime_query(
                 paths,
                 &profile,
-                ControlCommand::SetPolicy {
+                ControlCommand::SetPolicyOverride {
                     peer: peer_pubkey,
-                    send: policy.request.sign,
-                    receive: policy.respond.sign,
+                    policy_override_json: serde_json::to_string(&effective_override)
+                        .context("serialize policy override")?,
                 },
             )
             .await?;
@@ -807,14 +1090,14 @@ async fn handle_policy(paths: &ShellPaths, command: PolicyCommands) -> Result<()
             profile,
             peer_pubkey,
         } => {
-            let (manifest, policy) = clear_profile_peer_policy(paths, &profile, &peer_pubkey)?;
+            let (manifest, effective_override) = clear_profile_peer_policy(paths, &profile, &peer_pubkey)?;
             let result = daemon_runtime_query(
                 paths,
                 &profile,
-                ControlCommand::SetPolicy {
+                ControlCommand::SetPolicyOverride {
                     peer: peer_pubkey,
-                    send: policy.request.sign,
-                    receive: policy.respond.sign,
+                    policy_override_json: serde_json::to_string(&effective_override)
+                        .context("serialize policy override")?,
                 },
             )
             .await?;
@@ -877,15 +1160,6 @@ fn handle_keys(command: KeyCommands) -> Result<()> {
     }
 }
 
-async fn handle_dev(command: DevCommands) -> Result<()> {
-    match command {
-        DevCommands::Keygen { args } => keygen::run_keygen_command(&args),
-        DevCommands::Relay { args } => relay::run_relay_command(&args).await,
-        DevCommands::E2eNode { args } => e2e::run_e2e_node_command(&args),
-        DevCommands::E2eFull { args } => e2e::run_e2e_full_command(&args),
-    }
-}
-
 async fn handle_daemon_run(paths: &ShellPaths, args: DaemonRunArgs) -> Result<()> {
     let (_profile, mut resolved) = resolve_profile_runtime(paths, &args.profile)?;
     resolved.state_path = std::path::PathBuf::from(&resolved.state_path);
@@ -899,19 +1173,452 @@ async fn handle_daemon_run(paths: &ShellPaths, args: DaemonRunArgs) -> Result<()
     .await
 }
 
-fn parse_bool(value: &str) -> Result<bool> {
+fn resolve_onboard_secret(value: Option<String>, file: Option<String>) -> Result<String> {
+    resolve_secret_source_with(
+        value,
+        file,
+        std::io::stdin().is_terminal(),
+        "onboard-secret",
+        "onboard requires onboarding secret input; use --onboard-secret / --onboard-secret-file, or run on a TTY",
+        prompt_onboarding_secret,
+    )
+}
+
+fn resolve_profile_label(value: Option<String>) -> Result<String> {
+    resolve_profile_label_with(value, std::io::stdin().is_terminal(), prompt_profile_label)
+}
+
+fn resolve_profile_label_with<F>(
+    value: Option<String>,
+    stdin_is_terminal: bool,
+    prompt: F,
+) -> Result<String>
+where
+    F: FnOnce() -> Result<String>,
+{
     match value {
-        "true" | "1" | "yes" | "on" => Ok(true),
-        "false" | "0" | "no" | "off" => Ok(false),
-        _ => bail!("expected boolean value, got {value}"),
+        Some(value) if !value.trim().is_empty() => Ok(value),
+        Some(_) => bail!("label cannot be empty"),
+        None if stdin_is_terminal => prompt(),
+        None => bail!("onboard requires --label when stdin is not a TTY"),
     }
 }
 
-fn send_receive_policy(send: &str, receive: &str) -> Result<PeerPolicy> {
-    Ok(PeerPolicy::from_send_receive(
-        parse_bool(send)?,
-        parse_bool(receive)?,
-    ))
+fn resolve_vault_secret(value: Option<String>, file: Option<String>) -> Result<String> {
+    resolve_secret_source_with(
+        value,
+        file,
+        std::io::stdin().is_terminal(),
+        "vault-secret",
+        "onboard requires vault secret input; use --vault-secret / --vault-secret-file, or run on a TTY",
+        prompt_vault_secret,
+    )
+}
+
+fn resolve_package_secret(
+    value: Option<String>,
+    file: Option<String>,
+    missing_message: &str,
+) -> Result<String> {
+    resolve_secret_source_with(
+        value,
+        file,
+        std::io::stdin().is_terminal(),
+        "package-secret",
+        missing_message,
+        prompt_package_secret,
+    )
+}
+
+fn resolve_required_text<F>(
+    value: Option<String>,
+    stdin_is_terminal: bool,
+    missing_message: &str,
+    prompt: F,
+) -> Result<String>
+where
+    F: FnOnce() -> Result<String>,
+{
+    match value {
+        Some(value) if !value.trim().is_empty() => Ok(value.trim().to_string()),
+        Some(_) => bail!("value cannot be empty"),
+        None if stdin_is_terminal => prompt(),
+        None => bail!("{missing_message}"),
+    }
+}
+
+fn resolve_u16_input<F>(
+    value: Option<u16>,
+    stdin_is_terminal: bool,
+    label: &str,
+    missing_message: &str,
+    prompt: F,
+) -> Result<u16>
+where
+    F: FnOnce() -> Result<u16>,
+{
+    match value {
+        Some(value) if value > 0 => Ok(value),
+        Some(_) => bail!("{label} must be greater than zero"),
+        None if stdin_is_terminal => prompt(),
+        None => bail!("{missing_message}"),
+    }
+}
+
+fn resolve_member_index(
+    value: Option<u16>,
+    draft: &igloo_shell_core::shell::GeneratedKeysetDraft,
+    stdin_is_terminal: bool,
+    missing_message: &str,
+) -> Result<u16> {
+    match value {
+        Some(member_idx) => validate_member_index(draft, member_idx),
+        None if stdin_is_terminal => prompt_member_index(draft),
+        None => bail!("{missing_message}"),
+    }
+}
+
+fn validate_member_index(
+    draft: &igloo_shell_core::shell::GeneratedKeysetDraft,
+    member_idx: u16,
+) -> Result<u16> {
+    if draft.shares.iter().any(|share| share.member_idx == member_idx) {
+        return Ok(member_idx);
+    }
+    bail!("member index {member_idx} is not available in this generated keyset")
+}
+
+fn resolve_keygen_relays(relay_urls: Vec<String>, stdin_is_terminal: bool) -> Result<Vec<String>> {
+    if !relay_urls.is_empty() {
+        return Ok(relay_urls);
+    }
+    if stdin_is_terminal {
+        return prompt_relay_urls();
+    }
+    bail!("keygen requires at least one --relay-url when stdin is not a TTY")
+}
+
+fn resolve_secret_source_with<F>(
+    value: Option<String>,
+    file: Option<String>,
+    stdin_is_terminal: bool,
+    secret_label: &str,
+    missing_message: &str,
+    prompt: F,
+) -> Result<String>
+where
+    F: FnOnce() -> Result<String>,
+{
+    match (value, file) {
+        (Some(value), None) => {
+            if value.is_empty() {
+                bail!("{secret_label} cannot be empty");
+            }
+            Ok(value)
+        }
+        (None, Some(path)) => {
+            let value = fs::read_to_string(&path)
+                .with_context(|| format!("read {secret_label} file {path}"))?
+                .trim_end()
+                .to_string();
+            if value.is_empty() {
+                bail!("{secret_label} cannot be empty");
+            }
+            Ok(value)
+        }
+        (None, None) if stdin_is_terminal => {
+            let value = prompt()?.trim_end().to_string();
+            if value.is_empty() {
+                bail!("{secret_label} cannot be empty");
+            }
+            Ok(value)
+        }
+        (None, None) => bail!("{missing_message}"),
+        (Some(_), Some(_)) => unreachable!("clap enforces secret source conflicts"),
+    }
+}
+
+fn read_package_or_inline(package_or_path: &str) -> Result<String> {
+    let path = Path::new(package_or_path);
+    if path.exists() {
+        return Ok(fs::read_to_string(path)
+            .with_context(|| format!("read {}", path.display()))?
+            .trim()
+            .to_string());
+    }
+    Ok(package_or_path.to_string())
+}
+
+fn prompt_hidden_secret(lines: &[&str], prompt: &str) -> Result<String> {
+    for line in lines {
+        println!("{line}");
+    }
+    print!("{prompt}: ");
+    std::io::Write::flush(&mut std::io::stdout()).context("flush secret prompt")?;
+
+    enable_raw_mode().context("enable raw mode for secret prompt")?;
+    let mut password = String::new();
+    let result: Result<()> = loop {
+        match read().context("read secret input")? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+                KeyCode::Enter => break Ok(()),
+                KeyCode::Char(c) => password.push(c),
+                KeyCode::Backspace => {
+                    password.pop();
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    };
+    let disable_result = disable_raw_mode().context("disable raw mode for secret prompt");
+    println!();
+    result?;
+    disable_result?;
+
+    if password.is_empty() {
+        bail!("secret input cannot be empty");
+    }
+    Ok(password)
+}
+
+fn prompt_profile_label() -> Result<String> {
+    loop {
+        println!("Choose a name for this profile before entering any secrets.");
+        println!("This label will be shown in the TUI profile picker.");
+        print!("Profile name: ");
+        std::io::Write::flush(&mut std::io::stdout()).context("flush profile name prompt")?;
+
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .context("read profile name")?;
+        let value = input.trim().to_string();
+        if !value.is_empty() {
+            return Ok(value);
+        }
+        println!("Profile name cannot be empty.");
+    }
+}
+
+fn prompt_onboarding_secret() -> Result<String> {
+    prompt_hidden_secret(
+        &[
+            "This onboarding package is encrypted.",
+            "Type the onboarding secret now to decrypt the package input.",
+        ],
+        "Onboarding secret",
+    )
+}
+
+fn prompt_vault_secret() -> Result<String> {
+    loop {
+        let secret = prompt_hidden_secret(
+            &[
+                "This import will store secrets in your local igloo-shell vault.",
+                "Type a vault secret now to encrypt imported local secrets on this device.",
+            ],
+            "Vault secret",
+        )?;
+        let confirm = prompt_hidden_secret(
+            &["Retype the vault secret to confirm your input."],
+            "Confirm vault secret",
+        )?;
+        if secret == confirm {
+            return Ok(secret);
+        }
+        println!("Vault secrets did not match. Please try again.");
+    }
+}
+
+fn prompt_load_vault_secret() -> Result<String> {
+    prompt_hidden_secret(
+        &[
+            "Type the vault secret for the selected profile now.",
+            "igloo-shell will use it to unlock the profile and open the dashboard.",
+        ],
+        "Vault secret",
+    )
+}
+
+fn prompt_package_secret() -> Result<String> {
+    prompt_hidden_secret(
+        &[
+            "This package is encrypted.",
+            "Type the package secret now to continue the import or recovery flow.",
+        ],
+        "Package secret",
+    )
+}
+
+fn prompt_distribution_secret() -> Result<String> {
+    prompt_hidden_secret(
+        &[
+            "The remaining generated shares will be written as onboarding packages.",
+            "Type the onboarding secret that should encrypt those packages.",
+        ],
+        "Onboarding package secret",
+    )
+}
+
+fn prompt_keyset_name() -> Result<String> {
+    prompt_line(
+        &[
+            "Create a new local keyset.",
+            "Type the keyset name that should be used for these generated shares.",
+        ],
+        "Keyset name",
+    )
+}
+
+fn prompt_threshold() -> Result<u16> {
+    prompt_u16(
+        &["Type the signing threshold for the new keyset."],
+        "Threshold",
+    )
+}
+
+fn prompt_count() -> Result<u16> {
+    prompt_u16(
+        &["Type the total member count for the new keyset."],
+        "Member count",
+    )
+}
+
+fn prompt_relay_urls() -> Result<Vec<String>> {
+    loop {
+        let raw = prompt_line(
+            &[
+                "Type one or more relay URLs for this generated profile.",
+                "Use commas to separate multiple relay URLs.",
+            ],
+            "Relay URLs",
+        )?;
+        let relays = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        if !relays.is_empty() {
+            return Ok(relays);
+        }
+        println!("At least one relay URL is required.");
+    }
+}
+
+fn prompt_member_index(
+    draft: &igloo_shell_core::shell::GeneratedKeysetDraft,
+) -> Result<u16> {
+    println!("Select which generated share should stay on this device:");
+    for share in &draft.shares {
+        println!("  {}: {}", share.member_idx, share.label);
+    }
+    loop {
+        let member_idx = prompt_u16(&[], "Local member index")?;
+        match validate_member_index(draft, member_idx) {
+            Ok(member_idx) => return Ok(member_idx),
+            Err(err) => println!("{err}"),
+        }
+    }
+}
+
+fn prompt_line(lines: &[&str], prompt: &str) -> Result<String> {
+    for line in lines {
+        println!("{line}");
+    }
+    print!("{prompt}: ");
+    std::io::Write::flush(&mut std::io::stdout()).context("flush prompt")?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).context("read prompt input")?;
+    let value = input.trim().to_string();
+    if value.is_empty() {
+        bail!("{prompt} cannot be empty");
+    }
+    Ok(value)
+}
+
+fn prompt_u16(lines: &[&str], prompt: &str) -> Result<u16> {
+    loop {
+        match prompt_line(lines, prompt)?.parse::<u16>() {
+            Ok(value) if value > 0 => return Ok(value),
+            Ok(_) => println!("{prompt} must be greater than zero."),
+            Err(_) => println!("{prompt} must be a positive integer."),
+        }
+    }
+}
+
+fn prompt_select_profile(paths: &ShellPaths) -> Result<String> {
+    if !std::io::stdin().is_terminal() {
+        bail!("profile load requires a profile id when stdin is not a TTY");
+    }
+    let profiles = list_profiles(paths)?;
+    if profiles.is_empty() {
+        bail!("no profiles found; use igloo-shell onboard, import, recover, or keygen first");
+    }
+    println!("Select a profile to load:");
+    for (index, profile) in profiles.iter().enumerate() {
+        println!(
+            "  {}: {} ({})",
+            index + 1,
+            profile.label,
+            &profile.id[..profile.id.len().min(8)]
+        );
+    }
+    loop {
+        let selection = prompt_u16(&[], "Profile number")?;
+        let index = usize::from(selection.saturating_sub(1));
+        if let Some(profile) = profiles.get(index) {
+            return Ok(profile.id.clone());
+        }
+        println!("Profile number {selection} is not valid.");
+    }
+}
+
+async fn launch_dashboard(paths: &ShellPaths, profile_id: String, vault_secret: String) -> Result<()> {
+    tui::run_tui_with_options(
+        paths,
+        tui::TuiLaunchOptions {
+            profile_id: Some(profile_id),
+            initial_vault_secret: Some(vault_secret),
+        },
+    )
+    .await
+}
+
+fn result_profile(
+    result: &igloo_shell_core::shell::ProfileImportResult,
+) -> Result<&igloo_shell_core::shell::ProfileManifest> {
+    match result {
+        igloo_shell_core::shell::ProfileImportResult::ProfileCreated { profile, .. } => Ok(profile),
+        igloo_shell_core::shell::ProfileImportResult::OnboardingStaged { .. } => {
+            bail!("onboarding did not create a profile")
+        }
+    }
+}
+
+fn policy_direction(value: CliPolicyDirection) -> PolicyDirection {
+    match value {
+        CliPolicyDirection::Request => PolicyDirection::Request,
+        CliPolicyDirection::Respond => PolicyDirection::Respond,
+    }
+}
+
+fn policy_method(value: CliPolicyMethod) -> PolicyMethod {
+    match value {
+        CliPolicyMethod::Ping => PolicyMethod::Ping,
+        CliPolicyMethod::Onboard => PolicyMethod::Onboard,
+        CliPolicyMethod::Sign => PolicyMethod::Sign,
+        CliPolicyMethod::Ecdh => PolicyMethod::Ecdh,
+    }
+}
+
+fn policy_value(value: CliPolicyValue) -> PolicyOverrideValue {
+    match value {
+        CliPolicyValue::Unset => PolicyOverrideValue::Unset,
+        CliPolicyValue::Allow => PolicyOverrideValue::Allow,
+        CliPolicyValue::Deny => PolicyOverrideValue::Deny,
+    }
 }
 
 fn convert_key(from: &str, value: &str) -> Result<serde_json::Value> {
@@ -970,7 +1677,9 @@ fn convert_key(from: &str, value: &str) -> Result<serde_json::Value> {
                 }
             }))
         }
-        _ => bail!("unsupported key input kind {from}; expected hex-private, nsec, hex-public, or npub"),
+        _ => bail!(
+            "unsupported key input kind {from}; expected hex-private, nsec, hex-public, or npub"
+        ),
     }
 }
 
@@ -984,11 +1693,15 @@ fn strip_hex_prefix(value: &str) -> &str {
 fn load_secret_from_env(env_name: Option<String>) -> Result<Option<String>> {
     match env_name {
         Some(name) => Ok(Some(
-            std::env::var(&name)
-                .map_err(|_| anyhow::anyhow!("missing env var {name}"))?,
+            std::env::var(&name).map_err(|_| anyhow::anyhow!("missing env var {name}"))?,
         )),
         None => Ok(None),
     }
+}
+
+fn require_env_secret(env_name: Option<String>, label: &str) -> Result<String> {
+    load_secret_from_env(env_name)?
+        .ok_or_else(|| anyhow!("{label} must be provided through an environment variable"))
 }
 
 fn print_relay_profiles(paths: &ShellPaths) -> Result<()> {
@@ -1099,14 +1812,54 @@ fn log_options(args: &TraceArgs) -> LogOptions {
     }
 }
 
-fn with_subcommand(name: &str, mut args: Vec<String>) -> Vec<String> {
-    let mut full = vec![name.to_string()];
-    full.append(&mut args);
-    full
-}
+#[cfg(test)]
+mod tests {
+    use super::{resolve_profile_label_with, resolve_secret_source_with};
 
-fn with_leading_arg(name: &str, first: String, mut rest: Vec<String>) -> Vec<String> {
-    let mut full = vec![name.to_string(), first];
-    full.append(&mut rest);
-    full
+    #[test]
+    fn secret_source_prefers_flag_value() {
+        let value = resolve_secret_source_with(
+            Some("secret".to_string()),
+            None,
+            false,
+            "onboard-secret",
+            "missing",
+            || panic!("prompt should not be used"),
+        )
+        .expect("secret");
+        assert_eq!(value, "secret");
+    }
+
+    #[test]
+    fn secret_source_uses_prompt_on_tty() {
+        let value = resolve_secret_source_with(None, None, true, "vault-secret", "missing", || {
+            Ok("prompt-pass\n".to_string())
+        })
+        .expect("prompt secret");
+        assert_eq!(value, "prompt-pass");
+    }
+
+    #[test]
+    fn secret_source_rejects_non_tty_without_flags() {
+        let err =
+            resolve_secret_source_with(None, None, false, "vault-secret", "missing flags", || {
+                panic!("prompt should not be used")
+            })
+            .expect_err("non-tty should fail");
+        assert!(err.to_string().contains("missing flags"));
+    }
+
+    #[test]
+    fn profile_label_uses_prompt_on_tty() {
+        let label = resolve_profile_label_with(None, true, || Ok("Alice".to_string()))
+            .expect("profile label");
+        assert_eq!(label, "Alice");
+    }
+
+    #[test]
+    fn profile_label_requires_flag_on_non_tty() {
+        let err = resolve_profile_label_with(None, false, || panic!("prompt should not be used"))
+            .expect_err("missing label should fail");
+        assert!(err.to_string().contains("--label"));
+    }
 }

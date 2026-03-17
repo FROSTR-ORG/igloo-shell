@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BIFROST_MANIFEST="${ROOT_DIR}/../bifrost-rs/Cargo.toml"
 WORK_DIR="${ROOT_DIR}/dev/data/devnet"
 XDG_CONFIG_HOME="${WORK_DIR}/config"
 XDG_DATA_HOME="${WORK_DIR}/data"
@@ -40,6 +41,10 @@ need_cmd() {
 
 shell_cmd() {
   cargo run -p igloo-shell-cli --offline -- "$@"
+}
+
+devtools_cmd() {
+  cargo run --manifest-path "${BIFROST_MANIFEST}" -p bifrost-devtools --offline -- "$@"
 }
 
 managed_shell_cmd() {
@@ -90,11 +95,13 @@ import_profile() {
   local share_path="${MATERIAL_DIR}/share-${label}.json"
   local output
   output="$(
-    managed_shell_cmd profile import \
+    managed_shell_cmd import \
       --group "${MATERIAL_DIR}/group.json" \
       --share "${share_path}" \
       --label "${label}" \
-      --relay-profile local
+      --relay-profile local \
+      --vault-secret "${VAULT_PASSPHRASE}" \
+      --json
   )"
   printf '%s\n' "${output}" | parse_json_field "id"
 }
@@ -105,7 +112,7 @@ run_gen() {
   rm -rf "${WORK_DIR}"
   mkdir -p "${WORK_DIR}" "${MATERIAL_DIR}" "${LOG_DIR}"
 
-  shell_cmd dev keygen \
+  devtools_cmd keygen \
     --out-dir "${MATERIAL_DIR}" \
     --threshold 2 \
     --count 3 \
@@ -132,7 +139,7 @@ run_gen() {
 
 start_relay() {
   local existing
-  existing="$(pgrep -f "igloo-shell.*dev relay.*${RELAY_PORT}" | head -n 1 || true)"
+  existing="$(pgrep -f "bifrost-devtools.*relay.*${RELAY_PORT}" | head -n 1 || true)"
   if [[ -n "${existing}" ]]; then
     cat >"${PID_FILE}" <<EOF
 RELAY_PID=${existing}
@@ -142,7 +149,7 @@ EOF
     return
   fi
 
-  shell_cmd dev relay --host "${RELAY_HOST}" --port "${RELAY_PORT}" >"${LOG_DIR}/relay.log" 2>&1 &
+  devtools_cmd relay --host "${RELAY_HOST}" --port "${RELAY_PORT}" >"${LOG_DIR}/relay.log" 2>&1 &
   local relay_pid=$!
   cat >"${PID_FILE}" <<EOF
 RELAY_PID=${relay_pid}
@@ -266,21 +273,17 @@ run_smoke() {
   managed_shell_cmd runtime sign --profile "${ALICE_PROFILE_ID}" \
     aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >/dev/null
 
-  local invite_json invite_list_json challenge
-  invite_json="$(managed_shell_cmd invite create --profile "${ALICE_PROFILE_ID}" --label smoke)"
-  if [[ -z "$(printf '%s\n' "${invite_json}" | parse_json_field "token")" ]]; then
-    echo "error: failed to parse invite token" >&2
+  local onboard_path="${WORK_DIR}/smoke.bfonboard"
+  IGLOO_SHELL_PACKAGE_PASSWORD="smoke-password" \
+    managed_shell_cmd export "${ALICE_PROFILE_ID}" \
+      --format bfonboard \
+      --out "${onboard_path}" \
+      --recipient-share "${MATERIAL_DIR}/share-bob.json" \
+      --package-password-env IGLOO_SHELL_PACKAGE_PASSWORD >/dev/null
+  if [[ ! -s "${onboard_path}" ]]; then
+    echo "error: failed to export canonical bfonboard package" >&2
     exit 1
   fi
-  invite_list_json="$(managed_shell_cmd invite list --profile "${ALICE_PROFILE_ID}")"
-  challenge="$(printf '%s\n' "${invite_list_json}" | parse_json_field "challenge_hex")"
-  if [[ -z "${challenge}" ]]; then
-    echo "error: failed to parse invite challenge" >&2
-    exit 1
-  fi
-
-  managed_shell_cmd invite show --profile "${ALICE_PROFILE_ID}" "${challenge}" >/dev/null
-  managed_shell_cmd invite revoke --profile "${ALICE_PROFILE_ID}" "${challenge}" >/dev/null
 
   echo "smoke complete"
 }

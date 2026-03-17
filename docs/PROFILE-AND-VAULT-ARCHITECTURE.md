@@ -85,7 +85,7 @@ Shell vault storage is secret material under the XDG data root.
 It includes:
 
 - imported share packages
-- accepted onboarding packages before profile import completes
+- imported `bfonboard` packages before profile import completes
 - any future shell-owned secret import bundles
 
 Rules:
@@ -115,7 +115,7 @@ The shell treats artifacts as follows:
 
 - group package: managed, non-secret
 - share package: secret, vault-managed
-- accepted onboarding package: secret until imported, vault-managed
+- imported `bfonboard` package: secret until imported, vault-managed
 - runtime signer state: operational state, encrypted/persisted by runtime rules
 - relay profile and shell config: non-secret
 
@@ -125,10 +125,10 @@ This split is intentional. Group packages need management and discoverability, b
 
 ### Profile Import
 
-`profile import` accepts either:
+`import` accepts either:
 
 - a group package and share package
-- an accepted onboarding package
+- an encrypted `bfprofile` package
 
 Import flow:
 
@@ -169,7 +169,7 @@ The shell does not call the signer directly for live runtime actions.
 
 ### Profile Export
 
-`profile export` is the explicit path for writing user-chosen output files.
+`export` is the explicit path for writing user-chosen output files.
 
 Export flow:
 

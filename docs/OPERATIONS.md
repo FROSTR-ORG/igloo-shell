@@ -6,27 +6,36 @@ This manual covers shell-owned operator workflows for the hard-cut V2 shell.
 
 ```bash
 cargo run -p igloo-shell-cli -- profile list
+cargo run -p igloo-shell-cli -- profile load
+cargo run -p igloo-shell-cli -- profile backup alice --vault-passphrase-env IGLOO_SHELL_VAULT_PASSPHRASE
+cargo run -p igloo-shell-cli -- onboard ./onboard-bob.txt --label bob --onboard-secret-file ./onboard-bob.password.txt --vault-secret-file ./vault-secret.txt
+cargo run -p igloo-shell-cli -- import ./bob.bfprofile.txt --label bob --package-secret-file ./bob.package-secret.txt --vault-secret-file ./vault-secret.txt
+cargo run -p igloo-shell-cli -- recover ./bob.bfshare.txt --label bob --package-secret-file ./bob.package-secret.txt --vault-secret-file ./vault-secret.txt
+cargo run -p igloo-shell-cli -- keygen
+cargo run -p igloo-shell-cli -- export alice --out ./exports/alice --format raw
 cargo run -p igloo-shell-cli -- relays list
 cargo run -p igloo-shell-cli -- relays set demo --label Demo ws://127.0.0.1:8194
 cargo run -p igloo-shell-cli -- relays default demo
 ```
 
-The shell store and namespace-based CLI are live. The daemon/runtime/profile-import side of the hard cut is still being wired. `V2-SHELL-SPEC.md` is the source of truth for the final command surface.
+The shell store and CLI-first flow model are live. `profile load`, `onboard`, `import`, `recover`, and `keygen` are the supported entry paths into the logged-in shell. `V2-SHELL-SPEC.md` is the source of truth for the broader command surface.
 
 ## Developer Utilities
 
 ```bash
-cargo run -p igloo-shell-cli -- dev keygen --out-dir ./data --threshold 2 --count 3 --relay ws://127.0.0.1:8194
-cargo run -p igloo-shell-cli -- dev relay --host 127.0.0.1 --port 8194
-cargo run -p igloo-shell-cli -- invite assemble --token '<invite-token-json>' --share <share.json> --password-env INVITE_PASSWORD
-cargo run -p igloo-shell-cli -- invite accept <bfonboard1...> --password-env INVITE_PASSWORD
+cargo run --manifest-path ../bifrost-rs/Cargo.toml -p bifrost-devtools -- keygen --out-dir ./data --threshold 2 --count 3 --relay ws://127.0.0.1:8194
+cargo run --manifest-path ../bifrost-rs/Cargo.toml -p bifrost-devtools -- relay --host 127.0.0.1 --port 8194
+cargo run -p igloo-shell-cli -- export alice --out ./bob.onboard.txt --format bfonboard --recipient-share <share.json> --package-password-env IGLOO_SHELL_PACKAGE_PASSWORD
+cargo run -p igloo-shell-cli -- onboard ./onboard-bob.txt --label bob --onboard-secret-file ./onboard-bob.password.txt --vault-secret-file ./vault-secret.txt
+cargo run -p igloo-shell-cli -- onboard ./onboard-bob.txt --label bob --onboard-secret-file ./onboard-bob.password.txt --vault-secret-file ./vault-secret.txt --json
 ```
 
 ## Dev E2E
 
 ```bash
-cargo run -p igloo-shell-cli --offline -- dev e2e-node --out-dir ./data --relay ws://127.0.0.1:8194
-cargo run -p igloo-shell-cli --offline -- dev e2e-full --threshold 11 --count 15
+cargo build -p igloo-shell-cli --bin igloo-shell --offline
+cargo run --manifest-path ../bifrost-rs/Cargo.toml -p bifrost-devtools --offline -- e2e-node --out-dir ./data --relay ws://127.0.0.1:8194 --shell-bin ./target/debug/igloo-shell
+cargo run --manifest-path ../bifrost-rs/Cargo.toml -p bifrost-devtools --offline -- e2e-full --threshold 11 --count 15 --shell-bin ./target/debug/igloo-shell
 ```
 
 Convenience wrappers:
@@ -41,4 +50,11 @@ scripts/ws_soak.sh --iterations 25 --out dev/audit/work/evidence/ws-soak-$(date 
 ## Observability
 
 - The hard-cut shell store uses XDG config/data/state roots.
-- Runtime logging and daemon observability will arrive with the daemon slice.
+- Runtime logging and daemon observability are part of the live daemon-backed shell.
+
+## Interactive Onboarding
+
+- If `--label` is omitted on a TTY, `igloo-shell onboard` prompts for the profile name first.
+- The onboarding package secret is prompted next.
+- The vault secret prompt comes after package decryption succeeds, and requires confirmation.
+- A successful interactive onboard launches the logged-in shell with the new profile already unlocked for that session.

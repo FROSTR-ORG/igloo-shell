@@ -73,7 +73,8 @@ run_with_retry() {
   run cargo test --manifest-path "${BIFROST_ROOT}/Cargo.toml" -p bifrost-signer --offline invalid_locked_peer_response_fails_round_terminally
 
   echo "--- managed-profile runtime stress regression ---"
-  run_with_retry 3 cargo run --manifest-path "${SHELL_ROOT}/Cargo.toml" -p igloo-shell-cli --offline -- dev e2e-full --out-dir dev/data --relay ws://127.0.0.1:8194 --threshold 11 --count 15 --sign-iterations 20 --ecdh-iterations 20
+  run cargo build --manifest-path "${SHELL_ROOT}/Cargo.toml" -p igloo-shell-cli --bin igloo-shell --offline
+  run_with_retry 3 cargo run --manifest-path "${BIFROST_ROOT}/Cargo.toml" -p bifrost-devtools --offline -- e2e-full --out-dir dev/data --relay ws://127.0.0.1:8194 --threshold 11 --count 15 --sign-iterations 20 --ecdh-iterations 20 --shell-bin "${SHELL_ROOT}/target/debug/igloo-shell"
 
   echo "ws soak completed: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 } 2>&1 | tee "${OUT}"

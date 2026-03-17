@@ -16,6 +16,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 nostr = { version = "0.44", features = ["std"] }
+crossterm = "0.29"
 bifrost-app = { path = "../../../bifrost-rs/crates/bifrost-app" }
 bifrost-core = { path = "../../../bifrost-rs/crates/bifrost-core" }
+frostr-utils = { path = "../../../bifrost-rs/crates/frostr-utils" }
 igloo-shell-core = { path = "../igloo-shell-core" }

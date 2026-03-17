@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SESSION_NAME="igloo-shell-demo"
+SESSION_NAME="igloo-demo"
 DEVNET_SCRIPT="${ROOT_DIR}/scripts/devnet.sh"
 WORK_DIR="${ROOT_DIR}/dev/data/devnet"
 XDG_CONFIG_HOME="${WORK_DIR}/config"
@@ -59,7 +59,7 @@ create_layout() {
   tmux send-keys -t "${SESSION_NAME}:demo.0" \
     "cd '${ROOT_DIR}' && clear && echo 'Relay log (Ctrl+b d to detach)' && exec tail -n +1 -f '${LOG_DIR}/relay.log'" C-m
   tmux send-keys -t "${SESSION_NAME}:demo.1" \
-    "cd '${ROOT_DIR}' && clear && exec ${env_prefix} cargo run -p igloo-shell-cli --offline -- tui --profile '${ALICE_PROFILE_ID}'" C-m
+    "cd '${ROOT_DIR}' && clear && exec ${env_prefix} cargo run -p igloo-shell-cli --offline -- profile load '${ALICE_PROFILE_ID}' --vault-secret '${VAULT_PASSPHRASE}'" C-m
   tmux send-keys -t "${SESSION_NAME}:demo.2" \
     "cd '${ROOT_DIR}' && clear && exec ${env_prefix} cargo run -p igloo-shell-cli --offline -- daemon logs --follow --profile '${BOB_PROFILE_ID}'" C-m
   tmux send-keys -t "${SESSION_NAME}:demo.3" \

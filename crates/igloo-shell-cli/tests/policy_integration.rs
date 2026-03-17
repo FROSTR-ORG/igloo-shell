@@ -34,19 +34,32 @@ fn live_policy_commands_persist_and_update_runtime() {
         .expect("peer pubkey")
         .to_string();
 
-    let set_default = harness.run_json(
-        &[
-            "policy",
-            "set-default",
-            "--profile",
-            &alice_id,
-            "--send",
-            "false",
-            "--receive",
-            "true",
-        ],
+    let set_default = harness.run_json(&[
+        "policy",
+        "set-default-override",
+        "--profile",
+        &alice_id,
+        "--direction",
+        "request",
+        "--method",
+        "sign",
+        "--value",
+        "deny",
+    ]);
+    assert_eq!(
+        set_default.get("restart_required"),
+        Some(&Value::Bool(true))
     );
-    assert_eq!(set_default.get("restart_required"), Some(&Value::Bool(true)));
+    assert_eq!(
+        set_default
+            .get("manifest")
+            .and_then(|manifest| manifest.get("policy_overrides"))
+            .and_then(|overrides| overrides.get("default_override"))
+            .and_then(|policy| policy.get("request"))
+            .and_then(|request| request.get("sign"))
+            .and_then(Value::as_str),
+        Some("deny")
+    );
 
     harness.restart_daemon(&alice_id);
     harness.wait_for_runtime(&alice_id, Duration::from_secs(20));
@@ -54,52 +67,22 @@ fn live_policy_commands_persist_and_update_runtime() {
     let updated = harness.run_json_with_env(
         &[
             "policy",
-            "set-peer",
+            "set-peer-override",
             "--profile",
             &alice_id,
             &peer,
-            "--send",
-            "true",
-            "--receive",
-            "false",
+            "--direction",
+            "respond",
+            "--method",
+            "sign",
+            "--value",
+            "deny",
         ],
         &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
     );
     assert_eq!(updated.get("updated"), Some(&Value::Bool(true)));
     assert_eq!(updated.get("persisted"), Some(&Value::Bool(true)));
-
-    let live = harness.run_json_with_env(
-        &["policy", "show", "--profile", &alice_id],
-        &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
-    );
-    let live_policy = live
-        .get(&peer)
-        .expect("live peer policy");
-    assert_eq!(
-        live_policy
-            .get("request")
-            .and_then(|request| request.get("sign"))
-            .and_then(Value::as_bool),
-        Some(true)
-    );
-    assert_eq!(
-        live_policy
-            .get("respond")
-            .and_then(|respond| respond.get("sign"))
-            .and_then(Value::as_bool),
-        Some(false)
-    );
-
-    let manifest = harness.run_json(&["profile", "show", &alice_id]);
-    assert_eq!(
-        manifest
-            .get("policy_overrides")
-            .and_then(|overrides| overrides.get("default_policy"))
-            .and_then(|policy| policy.get("request"))
-            .and_then(|request| request.get("sign"))
-            .and_then(Value::as_bool),
-        Some(false)
-    );
+    assert!(updated.get("result").is_some());
 
     let cleared = harness.run_json_with_env(
         &["policy", "clear-peer", "--profile", &alice_id, &peer],
@@ -121,15 +104,17 @@ fn invalid_policy_bool_is_rejected() {
     let failure = harness.run_expect_failure(
         &[
             "policy",
-            "set-default",
+            "set-default-override",
             "--profile",
             "missing",
-            "--send",
+            "--direction",
+            "request",
+            "--method",
+            "sign",
+            "--value",
             "maybe",
-            "--receive",
-            "true",
         ],
         &[],
     );
-    assert!(failure.stderr.contains("expected boolean value"));
+    assert!(failure.stderr.contains("invalid value"));
 }

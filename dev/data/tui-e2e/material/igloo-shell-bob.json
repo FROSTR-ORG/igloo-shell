@@ -7,7 +7,7 @@
   ],
   "peers": [
     {
-      "pubkey": "069eac59f99e7149e737793f63c9efdf17d98deb7fe4dbfc20f8474025152786",
+      "pubkey": "d1cde4bad564ceee45ab10ab2aeb02a5b642f1b3ec07a5f6d746b0ce1f02ec15",
       "policy": {
         "block_all": false,
         "request": {
@@ -27,7 +27,7 @@
       }
     },
     {
-      "pubkey": "48826e7807fee25200d869254a34c263d41e102ac0122f17f962bde92e0b9e44",
+      "pubkey": "6a0ee16e174b958dd373b05c1d942116aa91cb22b1108f9c5179debc43f1fea5",
       "policy": {
         "block_all": false,
         "request": {

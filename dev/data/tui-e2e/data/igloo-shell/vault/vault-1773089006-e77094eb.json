@@ -1,0 +1,10 @@
+{
+  "id": "vault-1773089006-e77094eb",
+  "kind": "share_package",
+  "source": "file_import",
+  "ciphertext_path": "/home/cscott/Repos/frostr/frostr-infra/repos/igloo-shell/dev/data/tui-e2e/data/igloo-shell/vault/vault-1773089006-e77094eb.enc",
+  "key_source": "passphrase",
+  "salt_hex": "6c9f4d7d51dc85a538cd5de6952f73a6",
+  "created_at": 1773089006,
+  "updated_at": 1773089006
+}

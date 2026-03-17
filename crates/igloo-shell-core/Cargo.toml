@@ -21,6 +21,7 @@ sha2 = "0.10"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 tracing = "0.1"
+nostr = { version = "0.44", features = ["std"] }
 bifrost-app = { path = "../../../bifrost-rs/crates/bifrost-app" }
 bifrost-codec = { path = "../../../bifrost-rs/crates/bifrost-codec" }
 bifrost-core = { path = "../../../bifrost-rs/crates/bifrost-core" }

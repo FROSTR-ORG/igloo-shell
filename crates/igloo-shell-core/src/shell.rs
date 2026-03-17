@@ -1,29 +1,45 @@
 use std::fs;
 use std::fs::OpenOptions;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use argon2::Argon2;
 use anyhow::{Context, Result, anyhow, bail};
+use argon2::Argon2;
 use bifrost_app::host::{ControlCommand, DaemonClient, DaemonTransportConfig};
 use bifrost_app::onboarding::{
     BootstrapImportResult, BootstrapValidationReport, complete_onboarding_package,
     persist_validated_onboarding_state,
 };
-use bifrost_app::runtime::{AppOptions, PeerConfig, ResolvedAppConfig};
-use bifrost_codec::{parse_group_package, parse_share_package, wire::GroupPackageWire, wire::SharePackageWire};
-use bifrost_core::types::PeerPolicy;
+use bifrost_app::runtime::{AppOptions, ResolvedAppConfig};
+use bifrost_codec::{
+    parse_group_package, parse_share_package, wire::GroupPackageWire, wire::SharePackageWire,
+};
+use bifrost_core::types::{PeerPolicy, PeerPolicyOverride, PolicyOverrideValue};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
-use frostr_utils::decode_onboarding_package;
+use frostr_utils::{
+    BfManualPeerPolicyOverride, BfOnboardPayload, BfProfileDevice, BfProfileGroup,
+    BfProfilePayload, BfSharePayload, CreateKeysetConfig, PROFILE_BACKUP_EVENT_KIND,
+    BfRemotePeerPolicyObservation, bf_peer_scoped_policy_profile_to_core,
+    build_profile_backup_event, core_peer_policy_override_to_bf, create_keyset,
+    create_encrypted_profile_backup, decode_bfprofile_package, decode_bfshare_package,
+    decode_bfonboard_package, derive_profile_id_from_share_secret, encode_bfonboard_package, encode_bfprofile_package,
+    encode_bfshare_package,
+    parse_profile_backup_event,
+};
+use futures_util::{SinkExt, StreamExt};
 use k256::elliptic_curve::sec1::ToEncodedPoint;
+use nostr::Event;
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::Digest;
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message;
+use tokio::time::{timeout, Duration as TokioDuration};
 
 const SCHEMA_VERSION: u32 = 1;
 const VAULT_ENV_PASSPHRASE: &str = "IGLOO_SHELL_VAULT_PASSPHRASE";
@@ -175,6 +191,8 @@ pub struct ProfileManifest {
     pub runtime_options: Value,
     #[serde(default)]
     pub policy_overrides: Value,
+    #[serde(default)]
+    pub remote_policy_observations: Value,
     pub state_path: String,
     pub daemon_socket_path: String,
     pub created_at: u64,
@@ -218,9 +236,16 @@ pub struct ProfileDoctorReport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PolicyOverridesDocument {
     #[serde(default)]
-    default_policy: Option<PeerPolicy>,
+    default_override: Option<PeerPolicyOverride>,
     #[serde(default)]
-    peer_overrides: Vec<PeerConfig>,
+    peer_overrides: Vec<PolicyOverrideEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PolicyOverrideEntry {
+    pubkey: String,
+    #[serde(default)]
+    policy_override: PeerPolicyOverride,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -247,6 +272,22 @@ pub struct ProfileExportResult {
     pub share_path: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ProfilePackageExportResult {
+    pub profile_id: String,
+    pub format: String,
+    pub out_path: Option<String>,
+    pub package: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProfileBackupPublishResult {
+    pub profile_id: String,
+    pub relays: Vec<String>,
+    pub event_id: String,
+    pub author_pubkey: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StagedOnboardingImport {
     pub id: String,
@@ -255,7 +296,6 @@ pub struct StagedOnboardingImport {
     pub relay_profile: String,
     pub peer_pubkey: String,
     pub relays: Vec<String>,
-    pub challenge_hex32: Option<String>,
     pub created_at: u64,
 }
 
@@ -275,6 +315,43 @@ pub struct SetupRequest {
     pub relay_profile: Option<String>,
     pub vault_passphrase: Option<String>,
     pub onboarding_password: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProfilePreview {
+    pub profile_id: String,
+    pub label: String,
+    pub share_public_key: String,
+    pub group_public_key: String,
+    pub threshold: usize,
+    pub total_count: usize,
+    pub relays: Vec<String>,
+    pub peer_pubkey: Option<String>,
+    pub source: &'static str,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConnectedOnboardingImport {
+    pub preview: ProfilePreview,
+    pub completion: BootstrapImportResult,
+}
+
+#[derive(Debug, Clone)]
+pub struct GeneratedShareDraft {
+    pub member_idx: u16,
+    pub label: String,
+    pub share_public_key: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct GeneratedKeysetDraft {
+    pub keyset_name: String,
+    pub threshold: u16,
+    pub count: u16,
+    pub group_public_key: String,
+    pub shares: Vec<GeneratedShareDraft>,
+    group: bifrost_core::types::GroupPackage,
+    share_packages: Vec<bifrost_core::types::SharePackage>,
 }
 
 pub fn load_shell_config(paths: &ShellPaths) -> Result<ShellConfig> {
@@ -360,14 +437,16 @@ pub fn remove_profile(paths: &ShellPaths, profile_id: &str) -> Result<()> {
 
     let state_dir = paths.profile_state_dir(profile_id);
     if state_dir.exists() {
-        fs::remove_dir_all(&state_dir).with_context(|| format!("remove {}", state_dir.display()))?;
+        fs::remove_dir_all(&state_dir)
+            .with_context(|| format!("remove {}", state_dir.display()))?;
     }
 
     if is_managed_group_path(paths, &profile.group_ref)
         && !is_group_ref_in_use(paths, &profile.id, &profile.group_ref)?
         && Path::new(&profile.group_ref).exists()
     {
-        fs::remove_file(&profile.group_ref).with_context(|| format!("remove {}", profile.group_ref))?;
+        fs::remove_file(&profile.group_ref)
+            .with_context(|| format!("remove {}", profile.group_ref))?;
     }
 
     if let Ok(record) = read_vault_record(paths, &profile.share_ref)
@@ -408,7 +487,10 @@ pub fn remove_daemon_metadata(paths: &ShellPaths, profile_id: &str) -> Result<()
     Ok(())
 }
 
-pub fn doctor_profile(paths: &ShellPaths, profile: &ProfileManifest) -> Result<ProfileDoctorReport> {
+pub fn doctor_profile(
+    paths: &ShellPaths,
+    profile: &ProfileManifest,
+) -> Result<ProfileDoctorReport> {
     let relays = load_relay_profiles(paths)?;
     let relay_profile_exists = relays.iter().any(|entry| entry.id == profile.relay_profile);
 
@@ -458,25 +540,124 @@ pub fn doctor_profile(paths: &ShellPaths, profile: &ProfileManifest) -> Result<P
     })
 }
 
-pub fn set_profile_default_policy(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyDirection {
+    Request,
+    Respond,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyMethod {
+    Ping,
+    Onboard,
+    Sign,
+    Ecdh,
+}
+
+fn policy_field_mut(
+    policy: &mut PeerPolicyOverride,
+    direction: PolicyDirection,
+    method: PolicyMethod,
+) -> &mut PolicyOverrideValue {
+    let branch = match direction {
+        PolicyDirection::Request => &mut policy.request,
+        PolicyDirection::Respond => &mut policy.respond,
+    };
+    match method {
+        PolicyMethod::Ping => &mut branch.ping,
+        PolicyMethod::Onboard => &mut branch.onboard,
+        PolicyMethod::Sign => &mut branch.sign,
+        PolicyMethod::Ecdh => &mut branch.ecdh,
+    }
+}
+
+fn merge_policy_override(base: &PeerPolicyOverride, next: &PeerPolicyOverride) -> PeerPolicyOverride {
+    fn resolve(base: PolicyOverrideValue, next: PolicyOverrideValue) -> PolicyOverrideValue {
+        match next {
+            PolicyOverrideValue::Unset => base,
+            other => other,
+        }
+    }
+
+    PeerPolicyOverride {
+        request: bifrost_core::types::MethodPolicyOverride {
+            echo: resolve(base.request.echo, next.request.echo),
+            ping: resolve(base.request.ping, next.request.ping),
+            onboard: resolve(base.request.onboard, next.request.onboard),
+            sign: resolve(base.request.sign, next.request.sign),
+            ecdh: resolve(base.request.ecdh, next.request.ecdh),
+        },
+        respond: bifrost_core::types::MethodPolicyOverride {
+            echo: resolve(base.respond.echo, next.respond.echo),
+            ping: resolve(base.respond.ping, next.respond.ping),
+            onboard: resolve(base.respond.onboard, next.respond.onboard),
+            sign: resolve(base.respond.sign, next.respond.sign),
+            ecdh: resolve(base.respond.ecdh, next.respond.ecdh),
+        },
+    }
+}
+
+fn is_empty_policy_override(policy: &PeerPolicyOverride) -> bool {
+    let unset = PolicyOverrideValue::Unset;
+    [
+        policy.request.echo,
+        policy.request.ping,
+        policy.request.onboard,
+        policy.request.sign,
+        policy.request.ecdh,
+        policy.respond.echo,
+        policy.respond.ping,
+        policy.respond.onboard,
+        policy.respond.sign,
+        policy.respond.ecdh,
+    ]
+    .into_iter()
+    .all(|value| value == unset)
+}
+
+fn effective_policy_override(
+    document: &PolicyOverridesDocument,
+    peer_pubkey: &str,
+) -> PeerPolicyOverride {
+    let base = document.default_override.clone().unwrap_or_default();
+    let specific = document
+        .peer_overrides
+        .iter()
+        .find(|entry| entry.pubkey == peer_pubkey)
+        .map(|entry| entry.policy_override.clone())
+        .unwrap_or_default();
+    merge_policy_override(&base, &specific)
+}
+
+pub fn set_profile_default_policy_override(
     paths: &ShellPaths,
     profile_id: &str,
-    policy: PeerPolicy,
+    direction: PolicyDirection,
+    method: PolicyMethod,
+    value: PolicyOverrideValue,
 ) -> Result<ProfileManifest> {
     let mut profile = read_profile(paths, profile_id)?;
     let mut document = parse_policy_overrides_doc(profile.policy_overrides.clone())?;
-    document.default_policy = Some(policy);
+    let mut policy = document.default_override.clone().unwrap_or_default();
+    *policy_field_mut(&mut policy, direction, method) = value;
+    document.default_override = if is_empty_policy_override(&policy) {
+        None
+    } else {
+        Some(policy)
+    };
     profile.policy_overrides = serde_json::to_value(document)?;
     write_profile(paths, &profile)?;
     Ok(profile)
 }
 
-pub fn set_profile_peer_policy(
+pub fn set_profile_peer_policy_override(
     paths: &ShellPaths,
     profile_id: &str,
     peer_pubkey: &str,
-    policy: PeerPolicy,
-) -> Result<ProfileManifest> {
+    direction: PolicyDirection,
+    method: PolicyMethod,
+    value: PolicyOverrideValue,
+) -> Result<(ProfileManifest, PeerPolicyOverride)> {
     let mut profile = read_profile(paths, profile_id)?;
     let mut document = parse_policy_overrides_doc(profile.policy_overrides.clone())?;
     if let Some(existing) = document
@@ -484,32 +665,38 @@ pub fn set_profile_peer_policy(
         .iter_mut()
         .find(|entry| entry.pubkey == peer_pubkey)
     {
-        existing.policy = policy;
+        *policy_field_mut(&mut existing.policy_override, direction, method) = value;
     } else {
-        document.peer_overrides.push(PeerConfig {
+        let mut policy_override = PeerPolicyOverride::default();
+        *policy_field_mut(&mut policy_override, direction, method) = value;
+        document.peer_overrides.push(PolicyOverrideEntry {
             pubkey: peer_pubkey.to_string(),
-            policy,
+            policy_override,
         });
     }
     document
         .peer_overrides
+        .retain(|entry| !is_empty_policy_override(&entry.policy_override));
+    document
+        .peer_overrides
         .sort_by(|a, b| a.pubkey.cmp(&b.pubkey));
+    let effective_override = effective_policy_override(&document, peer_pubkey);
     profile.policy_overrides = serde_json::to_value(document)?;
     write_profile(paths, &profile)?;
-    Ok(profile)
+    Ok((profile, effective_override))
 }
 
 pub fn clear_profile_peer_policy(
     paths: &ShellPaths,
     profile_id: &str,
     peer_pubkey: &str,
-) -> Result<(ProfileManifest, PeerPolicy)> {
+) -> Result<(ProfileManifest, PeerPolicyOverride)> {
     let mut profile = read_profile(paths, profile_id)?;
     let mut document = parse_policy_overrides_doc(profile.policy_overrides.clone())?;
     document
         .peer_overrides
         .retain(|entry| entry.pubkey != peer_pubkey);
-    let effective_policy = document.default_policy.clone().unwrap_or_default();
+    let effective_policy = effective_policy_override(&document, peer_pubkey);
     profile.policy_overrides = serde_json::to_value(document)?;
     write_profile(paths, &profile)?;
     Ok((profile, effective_policy))
@@ -527,13 +714,16 @@ pub fn resolve_profile_runtime(
     let share_raw = load_share_payload(paths, &profile)?;
     let group = parse_group_package(&group_raw).context("parse profile group package")?;
     let share = parse_share_package(&share_raw).context("parse profile share package")?;
-    let peers = resolve_policy_peers(&group, &share, profile.policy_overrides.clone())
+    let (peers, manual_policy_overrides) =
+        resolve_profile_peers_and_overrides(&group, &share, profile.policy_overrides.clone())
         .context("resolve peer policy overrides")?;
+    let remote_policy_observations =
+        parse_remote_policy_observations_doc(profile.remote_policy_observations.clone())
+            .context("resolve remote policy observations")?;
     let options: AppOptions = if profile.runtime_options.is_null() {
         AppOptions::default()
     } else {
-        serde_json::from_value(profile.runtime_options.clone())
-            .context("parse runtime options")?
+        serde_json::from_value(profile.runtime_options.clone()).context("parse runtime options")?
     };
 
     Ok((
@@ -544,6 +734,8 @@ pub fn resolve_profile_runtime(
             state_path: PathBuf::from(&profile.state_path),
             relays: relay_profile.relays,
             peers,
+            manual_policy_overrides,
+            remote_policy_observations,
             options,
         },
     ))
@@ -575,6 +767,55 @@ pub struct RelayConnectivityReport {
     pub relays: Vec<RelayProbeResult>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellCheckKind {
+    Onboard,
+    Sign,
+    Ecdh,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ShellCheckResult {
+    pub kind: ShellCheckKind,
+    pub profile_id: String,
+    pub ready: bool,
+    pub reasons_not_ready: Vec<String>,
+    pub runtime_online: bool,
+    pub share_public_key: Option<String>,
+    pub group_public_key: Option<String>,
+    pub relay_urls: Vec<String>,
+    pub relay_connected_count: usize,
+    pub checked_at: u64,
+    pub details: Value,
+}
+
+fn runtime_peers(status: &Value) -> &[Value] {
+    status
+        .get("peers")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+fn runtime_readiness(status: &Value) -> Value {
+    status
+        .get("readiness")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(Default::default()))
+}
+
+fn peer_pubkeys_by<'a, F>(peers: &'a [Value], predicate: F) -> Vec<String>
+where
+    F: Fn(&'a Value) -> bool,
+{
+    peers.iter()
+        .filter(|peer| predicate(peer))
+        .filter_map(|peer| peer.get("pubkey").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
 pub fn build_daemon_transport(profile: &ProfileManifest) -> DaemonTransportConfig {
     let socket_path = shorten_unix_socket_path(&profile.daemon_socket_path, &profile.id);
     DaemonTransportConfig {
@@ -597,26 +838,7 @@ pub async fn test_relay_connectivity(
         }
     };
     let profile = read_relay_profile(paths, &selected)?;
-    let mut relays = Vec::with_capacity(profile.relays.len());
-    for relay in &profile.relays {
-        let outcome = match connect_async(relay.as_str()).await {
-            Ok((stream, _)) => {
-                let mut stream = stream;
-                let _ = stream.close(None).await;
-                RelayProbeResult {
-                    relay: relay.clone(),
-                    ok: true,
-                    error: None,
-                }
-            }
-            Err(err) => RelayProbeResult {
-                relay: relay.clone(),
-                ok: false,
-                error: Some(err.to_string()),
-            },
-        };
-        relays.push(outcome);
-    }
+    let relays = probe_relays(&profile.relays).await;
 
     Ok(RelayConnectivityReport {
         relay_profile_id: profile.id,
@@ -624,10 +846,234 @@ pub async fn test_relay_connectivity(
     })
 }
 
+pub async fn check_profile_runtime(
+    paths: &ShellPaths,
+    profile_id: &str,
+    kind: ShellCheckKind,
+) -> Result<ShellCheckResult> {
+    let profile = read_profile(paths, profile_id)?;
+    let relay_profile = read_relay_profile(paths, &profile.relay_profile)?;
+    let relay_urls = relay_profile.relays.clone();
+    let relays = probe_relays(&relay_urls).await;
+    let relay_connected_count = relays.iter().filter(|relay| relay.ok).count();
+    let checked_at = now_unix_secs();
+
+    let runtime_status = daemon_runtime_query(paths, profile_id, ControlCommand::RuntimeStatus).await;
+    let mut reasons_not_ready = Vec::new();
+    let mut runtime_online = false;
+    let mut share_public_key = None;
+    let mut group_public_key = None;
+    let mut details = serde_json::json!({
+        "relay_probes": relays,
+    });
+
+    let status = match runtime_status {
+        Ok(status) => {
+            runtime_online = true;
+            share_public_key = status
+                .get("metadata")
+                .and_then(|metadata| metadata.get("share_public_key"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            group_public_key = status
+                .get("metadata")
+                .and_then(|metadata| metadata.get("group_public_key"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            status
+        }
+        Err(err) => {
+            reasons_not_ready.push("daemon_unreachable".to_string());
+            details["daemon_error"] = Value::String(err.to_string());
+            return Ok(ShellCheckResult {
+                kind,
+                profile_id: profile_id.to_string(),
+                ready: false,
+                reasons_not_ready,
+                runtime_online,
+                share_public_key,
+                group_public_key,
+                relay_urls,
+                relay_connected_count,
+                checked_at,
+                details,
+            });
+        }
+    };
+
+    if share_public_key.is_none() {
+        reasons_not_ready.push("missing_share_identity".to_string());
+    }
+    if group_public_key.is_none() {
+        reasons_not_ready.push("missing_group_identity".to_string());
+    }
+    if relay_connected_count == 0 {
+        reasons_not_ready.push("no_connected_relays".to_string());
+    }
+
+    let ready = match kind {
+        ShellCheckKind::Onboard => {
+            let restore_complete = status
+                .get("readiness")
+                .and_then(|readiness| readiness.get("restore_complete"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let peer_callback_ready = share_public_key.is_some() && group_public_key.is_some();
+            let online_peer_count = status
+                .get("peers")
+                .and_then(Value::as_array)
+                .map(|peers| {
+                    peers.iter()
+                        .filter(|peer| peer.get("online").and_then(Value::as_bool).unwrap_or(false))
+                        .count()
+                })
+                .unwrap_or(0);
+            let known_peer_count = status
+                .get("status")
+                .and_then(|device_status| device_status.get("known_peers"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let degraded_reasons = status
+                .get("readiness")
+                .and_then(|readiness| readiness.get("degraded_reasons"))
+                .cloned()
+                .unwrap_or_else(|| Value::Array(Vec::new()));
+            details["restore_complete"] = Value::Bool(restore_complete);
+            details["peer_callback_ready"] = Value::Bool(peer_callback_ready);
+            details["known_peer_count"] = Value::Number(known_peer_count.into());
+            details["online_peer_count"] = Value::Number((online_peer_count as u64).into());
+            details["degraded_reasons"] = degraded_reasons;
+            reasons_not_ready.is_empty() && runtime_online && peer_callback_ready
+        }
+        ShellCheckKind::Sign => {
+            let readiness = runtime_readiness(&status);
+            let peers = runtime_peers(&status);
+            let sign_ready = readiness
+                .get("sign_ready")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let threshold = readiness
+                .get("threshold")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize;
+            let sign_responder_peers = peer_pubkeys_by(peers, |peer| {
+                peer.get("online").and_then(Value::as_bool).unwrap_or(false)
+                    && peer
+                        .get("outgoing_available")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0)
+                        > 0
+            });
+            let sign_initiator_peers = peer_pubkeys_by(peers, |peer| {
+                peer.get("can_sign").and_then(Value::as_bool).unwrap_or(false)
+            });
+            let all_peer_pubkeys = peer_pubkeys_by(peers, |_| true);
+            let missing_initiators = all_peer_pubkeys
+                .iter()
+                .filter(|pubkey| !sign_initiator_peers.contains(pubkey))
+                .cloned()
+                .collect::<Vec<_>>();
+            let missing_responders = all_peer_pubkeys
+                .iter()
+                .filter(|pubkey| !sign_responder_peers.contains(pubkey))
+                .cloned()
+                .collect::<Vec<_>>();
+            let restore_complete = readiness
+                .get("restore_complete")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let degraded_reasons = readiness
+                .get("degraded_reasons")
+                .cloned()
+                .unwrap_or_else(|| Value::Array(Vec::new()));
+            let sign_responder_ready = sign_responder_peers.len() >= threshold;
+
+            if !restore_complete {
+                reasons_not_ready.push("restore_incomplete".to_string());
+            }
+            if !sign_ready || !sign_responder_ready {
+                reasons_not_ready.push("insufficient_signing_peers".to_string());
+            }
+            if degraded_reasons.as_array().is_some_and(|reasons| !reasons.is_empty()) {
+                reasons_not_ready.push("runtime_degraded".to_string());
+            }
+
+            details["readiness"] = readiness;
+            details["sign_initiator_peer_count"] = Value::Number((sign_initiator_peers.len() as u64).into());
+            details["sign_responder_peer_count"] = Value::Number((sign_responder_peers.len() as u64).into());
+            details["sign_initiator_peers"] = serde_json::json!(sign_initiator_peers);
+            details["sign_responder_peers"] = serde_json::json!(sign_responder_peers);
+            details["missing_sign_initiator_peers"] = serde_json::json!(missing_initiators);
+            details["missing_sign_responder_peers"] = serde_json::json!(missing_responders);
+            reasons_not_ready.is_empty()
+        }
+        ShellCheckKind::Ecdh => {
+            let readiness = runtime_readiness(&status);
+            let peers = runtime_peers(&status);
+            let ecdh_ready = readiness
+                .get("ecdh_ready")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let ecdh_ready_peers = peer_pubkeys_by(peers, |peer| {
+                peer.get("online").and_then(Value::as_bool).unwrap_or(false)
+            });
+            let all_peer_pubkeys = peer_pubkeys_by(peers, |_| true);
+            let missing_ecdh = all_peer_pubkeys
+                .iter()
+                .filter(|pubkey| !ecdh_ready_peers.contains(pubkey))
+                .cloned()
+                .collect::<Vec<_>>();
+            let restore_complete = readiness
+                .get("restore_complete")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let degraded_reasons = readiness
+                .get("degraded_reasons")
+                .cloned()
+                .unwrap_or_else(|| Value::Array(Vec::new()));
+
+            if !restore_complete {
+                reasons_not_ready.push("restore_incomplete".to_string());
+            }
+            if !ecdh_ready {
+                reasons_not_ready.push("insufficient_ecdh_peers".to_string());
+            }
+            if degraded_reasons.as_array().is_some_and(|reasons| !reasons.is_empty()) {
+                reasons_not_ready.push("runtime_degraded".to_string());
+            }
+
+            details["readiness"] = readiness;
+            details["ecdh_peer_count"] = Value::Number((ecdh_ready_peers.len() as u64).into());
+            details["ecdh_ready_peers"] = serde_json::json!(ecdh_ready_peers);
+            details["missing_ecdh_peers"] = serde_json::json!(missing_ecdh);
+            reasons_not_ready.is_empty()
+        }
+    };
+
+    Ok(ShellCheckResult {
+        kind,
+        profile_id: profile_id.to_string(),
+        ready,
+        reasons_not_ready,
+        runtime_online,
+        share_public_key,
+        group_public_key,
+        relay_urls,
+        relay_connected_count,
+        checked_at,
+        details,
+    })
+}
+
 #[cfg(unix)]
-pub async fn start_profile_daemon(paths: &ShellPaths, profile_id: &str) -> Result<DaemonMetadata> {
+pub async fn start_profile_daemon_with_passphrase(
+    paths: &ShellPaths,
+    profile_id: &str,
+    vault_passphrase: Option<String>,
+) -> Result<DaemonMetadata> {
     paths.ensure()?;
     let profile = read_profile(paths, profile_id)?;
+    validate_profile_unlock(paths, &profile, vault_passphrase.clone())?;
     let transport = build_daemon_transport(&profile);
     let log_path = paths.daemon_log_path(profile_id);
     if let Some(parent) = log_path.parent() {
@@ -641,7 +1087,8 @@ pub async fn start_profile_daemon(paths: &ShellPaths, profile_id: &str) -> Resul
         .with_context(|| format!("open {}", log_path.display()))?;
     let stderr = stdout.try_clone().context("clone daemon log handle")?;
     let exe = std::env::current_exe().context("resolve current executable")?;
-    let child = Command::new(exe)
+    let mut command = Command::new(exe);
+    command
         .arg("__daemon-run")
         .arg("--profile")
         .arg(profile_id)
@@ -650,9 +1097,11 @@ pub async fn start_profile_daemon(paths: &ShellPaths, profile_id: &str) -> Resul
         .arg("--token")
         .arg(&transport.token)
         .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
-        .spawn()
-        .context("spawn igloo-shell daemon")?;
+        .stderr(Stdio::from(stderr));
+    if let Some(passphrase) = &vault_passphrase {
+        command.env(VAULT_ENV_PASSPHRASE, passphrase);
+    }
+    let mut child = command.spawn().context("spawn igloo-shell daemon")?;
 
     let metadata = DaemonMetadata {
         profile_id: profile_id.to_string(),
@@ -675,10 +1124,21 @@ pub async fn start_profile_daemon(paths: &ShellPaths, profile_id: &str) -> Resul
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
+    if let Ok(None) = child.try_wait() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let _ = remove_daemon_metadata(paths, profile_id);
+
     Err(anyhow!(
         "daemon did not become ready for profile {profile_id}: {}",
         last_error.unwrap_or_else(|| "unknown startup failure".to_string())
     ))
+}
+
+#[cfg(unix)]
+pub async fn start_profile_daemon(paths: &ShellPaths, profile_id: &str) -> Result<DaemonMetadata> {
+    start_profile_daemon_with_passphrase(paths, profile_id, None).await
 }
 
 #[cfg(unix)]
@@ -713,6 +1173,9 @@ pub fn import_profile_from_files(
         fs::read_to_string(share_path).with_context(|| format!("read {}", share_path.display()))?;
     let group = parse_group_package(&group_raw).context("parse group package")?;
     let share = parse_share_package(&share_raw).context("parse share package")?;
+    let share_secret_hex = hex::encode(share.seckey);
+    let profile_id = derive_profile_id_for_share_secret(&share_secret_hex)?;
+    ensure_profile_id_unused(paths, &profile_id)?;
 
     let relay_profile_id = resolve_relay_profile_id(paths, relay_profile)?;
     let now = now_unix_secs();
@@ -724,7 +1187,6 @@ pub fn import_profile_from_files(
         &share_raw,
         vault_passphrase,
     )?;
-    let profile_id = generate_profile_id(label.as_deref());
     let profile = build_profile_manifest(
         paths,
         &profile_id,
@@ -764,10 +1226,10 @@ pub fn stage_onboarding_import(
         ONBOARDING_ENV_PASSPHRASE,
         "onboarding package password",
     )?;
-    let decoded = decode_onboarding_package(&package_raw, Some(password.as_str()))
-        .context("decode onboarding package")?;
-    let relay_profile_id = relay_profile
-        .unwrap_or_else(|| format!("onboarding-{}", now_unix_secs()));
+    let decoded = decode_bfonboard_package(&package_raw, password.as_str())
+        .context("decode bfonboard package")?;
+    let relay_profile_id =
+        relay_profile.unwrap_or_else(|| format!("onboarding-{}", now_unix_secs()));
     if read_relay_profile(paths, &relay_profile_id).is_err() {
         replace_relay_profile(
             paths,
@@ -795,7 +1257,6 @@ pub fn stage_onboarding_import(
         relay_profile: relay_profile_id,
         peer_pubkey: hex::encode(decoded.peer_pk),
         relays: decoded.relays,
-        challenge_hex32: decoded.challenge.map(hex::encode),
         created_at: now_unix_secs(),
     };
     write_json(
@@ -854,6 +1315,58 @@ pub async fn import_profile_from_onboarding_value(
     .await
 }
 
+pub async fn connect_onboarding_package_preview(
+    package_raw: &str,
+    onboarding_password: String,
+) -> Result<ConnectedOnboardingImport> {
+    let decoded = decode_bfonboard_package(package_raw, onboarding_password.as_str())
+        .context("decode bfonboard package")?;
+    let completion = complete_onboarding_package(decoded, Duration::from_secs(30)).await?;
+    let preview = preview_from_bootstrap_completion(
+        &completion,
+        None,
+        "bfonboard",
+        Some(completion.peer_pubkey.clone()),
+    )?;
+    Ok(ConnectedOnboardingImport {
+        preview,
+        completion,
+    })
+}
+
+pub(crate) fn finalize_connected_onboarding_import(
+    paths: &ShellPaths,
+    connection: ConnectedOnboardingImport,
+    label: Option<String>,
+    relay_profile: Option<String>,
+    vault_passphrase: Option<String>,
+) -> Result<ProfileImportResult> {
+    paths.ensure()?;
+    let relay_profile_id = ensure_onboarding_relay_profile(
+        paths,
+        relay_profile,
+        label.as_deref(),
+        &connection.completion.relays,
+    )?;
+    let share_raw =
+        serde_json::to_string_pretty(&SharePackageWire::from(connection.completion.share.clone()))
+            .context("serialize onboarded share package")?;
+    let vault_record = store_secret_payload(
+        paths,
+        "share_package",
+        "bfonboard_import",
+        &share_raw,
+        vault_passphrase,
+    )?;
+    finalize_onboarding_import(
+        paths,
+        connection.completion,
+        label,
+        relay_profile_id,
+        vault_record,
+    )
+}
+
 async fn import_profile_from_onboarding_value_with<F, Fut>(
     paths: &ShellPaths,
     package_raw: &str,
@@ -864,7 +1377,7 @@ async fn import_profile_from_onboarding_value_with<F, Fut>(
     complete: F,
 ) -> Result<ProfileImportResult>
 where
-    F: FnOnce(frostr_utils::OnboardingPackage) -> Fut,
+    F: FnOnce(BfOnboardPayload) -> Fut,
     Fut: std::future::Future<Output = Result<BootstrapImportResult>>,
 {
     paths.ensure()?;
@@ -874,9 +1387,10 @@ where
         ONBOARDING_ENV_PASSPHRASE,
         "onboarding package password",
     )?;
-    let decoded = decode_onboarding_package(&package_raw, Some(password.as_str()))
-        .context("decode onboarding package")?;
-    let relay_profile_id = ensure_onboarding_relay_profile(paths, relay_profile, label.as_deref(), &decoded.relays)?;
+    let decoded = decode_bfonboard_package(&package_raw, password.as_str())
+        .context("decode bfonboard package")?;
+    let relay_profile_id =
+        ensure_onboarding_relay_profile(paths, relay_profile, label.as_deref(), &decoded.relays)?;
     let vault_record = store_secret_payload(
         paths,
         "onboarding_package",
@@ -898,13 +1412,24 @@ where
     let share_record = store_secret_payload(
         paths,
         "share_package",
-        "invite_accept",
+        "bfonboard_import",
         &share_raw,
         vault_passphrase_for_share,
     )?;
     let _ = remove_vault_record(paths, &vault_record.id);
 
     finalize_onboarding_import(paths, completion, label, relay_profile_id, share_record)
+}
+
+pub fn preview_bfprofile_value(
+    package_raw: &str,
+    package_password: String,
+    label: Option<String>,
+) -> Result<(ProfilePreview, BfProfilePayload)> {
+    let payload = decode_bfprofile_package(package_raw, &package_password)
+        .context("decode bfprofile package")?;
+    let preview = preview_from_profile_payload(&payload, label, "bfprofile")?;
+    Ok((preview, payload))
 }
 
 pub fn export_profile(
@@ -937,7 +1462,719 @@ pub fn export_profile(
     })
 }
 
-pub async fn run_setup(paths: &ShellPaths, request: SetupRequest, start_daemon: bool) -> Result<SetupResult> {
+pub fn import_profile_from_bfprofile_value(
+    paths: &ShellPaths,
+    package_raw: &str,
+    package_password: String,
+    label: Option<String>,
+    relay_profile: Option<String>,
+    vault_passphrase: Option<String>,
+) -> Result<ProfileImportResult> {
+    let payload = decode_bfprofile_package(package_raw, &package_password)
+        .context("decode bfprofile package")?;
+    import_profile_from_bfprofile_payload(paths, payload, label, relay_profile, vault_passphrase)
+}
+
+pub async fn preview_bfshare_recovery(
+    package_raw: &str,
+    package_password: String,
+    label: Option<String>,
+) -> Result<(ProfilePreview, BfProfilePayload)> {
+    let share = decode_bfshare_package(package_raw, &package_password).context("decode bfshare package")?;
+    let author_pubkey = derive_member_pubkey_hex(hex_to_bytes32(&share.share_secret)?)?;
+    let event = fetch_latest_nostr_event(&share.relays, &author_pubkey, PROFILE_BACKUP_EVENT_KIND).await?;
+    let backup = parse_profile_backup_event(&event, &share.share_secret).context("parse encrypted profile backup")?;
+    let payload = BfProfilePayload {
+        profile_id: derive_profile_id_for_share_secret(&share.share_secret)?,
+        version: backup.version,
+        device: BfProfileDevice {
+            name: label.clone().unwrap_or_else(|| backup.device.name.clone()),
+            share_secret: share.share_secret,
+            manual_peer_policy_overrides: backup.device.manual_peer_policy_overrides,
+            remote_peer_policy_observations: backup.device.remote_peer_policy_observations,
+            relays: backup.device.relays,
+        },
+        group: backup.group,
+    };
+    let preview = preview_from_profile_payload(&payload, label, "bfshare")?;
+    Ok((preview, payload))
+}
+
+pub fn export_profile_as_bfprofile(
+    paths: &ShellPaths,
+    profile_id: &str,
+    package_password: String,
+    vault_passphrase: Option<String>,
+    out_path: Option<&Path>,
+) -> Result<ProfilePackageExportResult> {
+    let payload = profile_to_package_payload(paths, profile_id, vault_passphrase)?;
+    let package = encode_bfprofile_package(&payload, &package_password)
+        .context("encode bfprofile package")?;
+    write_package_output(out_path, &package)?;
+    Ok(ProfilePackageExportResult {
+        profile_id: profile_id.to_string(),
+        format: "bfprofile".to_string(),
+        out_path: out_path.map(|path| path.display().to_string()),
+        package,
+    })
+}
+
+pub fn export_profile_as_bfshare(
+    paths: &ShellPaths,
+    profile_id: &str,
+    package_password: String,
+    vault_passphrase: Option<String>,
+    out_path: Option<&Path>,
+) -> Result<ProfilePackageExportResult> {
+    let payload = profile_to_package_payload(paths, profile_id, vault_passphrase)?;
+    let package = encode_bfshare_package(
+        &BfSharePayload {
+            share_secret: payload.device.share_secret,
+            relays: payload.device.relays,
+        },
+        &package_password,
+    )
+    .context("encode bfshare package")?;
+    write_package_output(out_path, &package)?;
+    Ok(ProfilePackageExportResult {
+        profile_id: profile_id.to_string(),
+        format: "bfshare".to_string(),
+        out_path: out_path.map(|path| path.display().to_string()),
+        package,
+    })
+}
+
+pub fn export_profile_as_bfonboard(
+    paths: &ShellPaths,
+    profile_id: &str,
+    recipient_share_path: &Path,
+    relay_urls: Option<Vec<String>>,
+    package_password: String,
+    vault_passphrase: Option<String>,
+    out_path: Option<&Path>,
+) -> Result<ProfilePackageExportResult> {
+    let payload = profile_to_package_payload(paths, profile_id, vault_passphrase)?;
+    let recipient_share_raw = fs::read_to_string(recipient_share_path)
+        .with_context(|| format!("read {}", recipient_share_path.display()))?;
+    let recipient_share = parse_share_package(&recipient_share_raw).context("parse recipient share")?;
+    let relays = relay_urls
+        .unwrap_or(payload.device.relays)
+        .into_iter()
+        .map(|relay| relay.trim().to_string())
+        .filter(|relay| !relay.is_empty())
+        .collect::<Vec<_>>();
+    if relays.is_empty() {
+        bail!("bfonboard export requires at least one relay url");
+    }
+    let package = encode_bfonboard_package(
+        &BfOnboardPayload {
+            share_secret: hex::encode(recipient_share.seckey),
+            relays,
+            peer_pk: derive_member_pubkey_hex(hex_to_bytes32(&payload.device.share_secret)?)?,
+        },
+        &package_password,
+    )
+    .context("encode bfonboard package")?;
+    write_package_output(out_path, &package)?;
+    Ok(ProfilePackageExportResult {
+        profile_id: profile_id.to_string(),
+        format: "bfonboard".to_string(),
+        out_path: out_path.map(|path| path.display().to_string()),
+        package,
+    })
+}
+
+pub async fn publish_profile_backup(
+    paths: &ShellPaths,
+    profile_id: &str,
+    vault_passphrase: Option<String>,
+) -> Result<ProfileBackupPublishResult> {
+    let payload = profile_to_package_payload(paths, profile_id, vault_passphrase)?;
+    let backup = create_encrypted_profile_backup(&payload).context("build encrypted backup")?;
+    let event = build_profile_backup_event(&payload.device.share_secret, &backup, None)
+        .context("build backup event")?;
+    publish_nostr_event(&payload.device.relays, &event).await?;
+    Ok(ProfileBackupPublishResult {
+        profile_id: profile_id.to_string(),
+        relays: payload.device.relays,
+        event_id: event.id.to_hex(),
+        author_pubkey: event.pubkey.to_string(),
+    })
+}
+
+pub async fn recover_profile_from_bfshare_value(
+    paths: &ShellPaths,
+    package_raw: &str,
+    package_password: String,
+    label: Option<String>,
+    relay_profile: Option<String>,
+    vault_passphrase: Option<String>,
+) -> Result<ProfileImportResult> {
+    let share = decode_bfshare_package(package_raw, &package_password).context("decode bfshare package")?;
+    let author_pubkey = derive_member_pubkey_hex(hex_to_bytes32(&share.share_secret)?)?;
+    let event = fetch_latest_nostr_event(&share.relays, &author_pubkey, PROFILE_BACKUP_EVENT_KIND).await?;
+    let backup = parse_profile_backup_event(&event, &share.share_secret).context("parse encrypted profile backup")?;
+    let payload = BfProfilePayload {
+        profile_id: derive_profile_id_for_share_secret(&share.share_secret)?,
+        version: backup.version,
+        device: BfProfileDevice {
+            name: label.unwrap_or_else(|| backup.device.name.clone()),
+            share_secret: share.share_secret,
+            manual_peer_policy_overrides: backup.device.manual_peer_policy_overrides,
+            remote_peer_policy_observations: backup.device.remote_peer_policy_observations,
+            relays: backup.device.relays,
+        },
+        group: backup.group,
+    };
+    import_profile_from_bfprofile_payload(paths, payload, None, relay_profile, vault_passphrase)
+}
+
+pub(crate) fn import_profile_from_bfprofile_payload(
+    paths: &ShellPaths,
+    payload: BfProfilePayload,
+    label: Option<String>,
+    relay_profile: Option<String>,
+    vault_passphrase: Option<String>,
+) -> Result<ProfileImportResult> {
+    paths.ensure()?;
+    let relay_profile_id = ensure_onboarding_relay_profile(
+        paths,
+        relay_profile,
+        Some(label.as_deref().unwrap_or(&payload.device.name)),
+        &payload.device.relays,
+    )?;
+    let group = bifrost_core::types::GroupPackage {
+        group_pk: hex_to_bytes32(&payload.group.group_public_key)?,
+        threshold: payload.group.threshold,
+        members: payload
+            .group
+            .members
+            .iter()
+            .map(|member| {
+                let xonly = hex_to_bytes32(&member.share_public_key)?;
+                let mut pubkey = [0u8; 33];
+                pubkey[0] = 0x02;
+                pubkey[1..].copy_from_slice(&xonly);
+                Ok(bifrost_core::types::MemberPackage {
+                    idx: member.index,
+                    pubkey,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+    };
+    let share = bifrost_core::types::SharePackage {
+        idx: find_member_index_for_share_secret(&group, &payload.device.share_secret)?,
+        seckey: hex_to_bytes32(&payload.device.share_secret)?,
+    };
+    let now = now_unix_secs();
+    let group_ref = store_group_package(paths, &group)?;
+    let share_raw = serde_json::to_string_pretty(&SharePackageWire::from(share.clone()))
+        .context("serialize bfprofile share package")?;
+    let vault_record = store_secret_payload(
+        paths,
+        "share_package",
+        "bfprofile_import",
+        &share_raw,
+        vault_passphrase,
+    )?;
+    let mut profile = build_profile_manifest(
+        paths,
+        &payload.profile_id,
+        label.unwrap_or(payload.device.name),
+        group_ref,
+        vault_record.id.clone(),
+        relay_profile_id,
+        now,
+    );
+    profile.policy_overrides = build_policy_overrides_value(&payload.device.manual_peer_policy_overrides)?;
+    profile.remote_policy_observations =
+        build_remote_policy_observations_value(&payload.device.remote_peer_policy_observations)?;
+    fs::create_dir_all(paths.profile_state_dir(&profile.id))
+        .with_context(|| format!("create {}", paths.profile_state_dir(&profile.id).display()))?;
+    write_profile(paths, &profile)?;
+    touch_last_used_profile(paths, &profile.id)?;
+    Ok(ProfileImportResult::ProfileCreated {
+        profile,
+        vault_record,
+        diagnostics: None,
+        warnings: Vec::new(),
+    })
+}
+
+pub fn create_generated_keyset_draft(
+    keyset_name: String,
+    threshold: u16,
+    count: u16,
+) -> Result<GeneratedKeysetDraft> {
+    let bundle = create_keyset(CreateKeysetConfig { threshold, count })
+        .map_err(|error| anyhow!("create keyset: {error}"))?;
+    let shares = bundle
+        .shares
+        .iter()
+        .map(|share| {
+            Ok(GeneratedShareDraft {
+                member_idx: share.idx,
+                label: format!("{keyset_name} Device {}", share.idx),
+                share_public_key: derive_member_pubkey_hex(share.seckey)?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(GeneratedKeysetDraft {
+        keyset_name,
+        threshold,
+        count,
+        group_public_key: hex::encode(bundle.group.group_pk),
+        shares,
+        group: bundle.group,
+        share_packages: bundle.shares,
+    })
+}
+
+pub fn import_generated_share(
+    paths: &ShellPaths,
+    draft: &GeneratedKeysetDraft,
+    member_idx: u16,
+    label: String,
+    relay_urls: Vec<String>,
+    vault_passphrase: Option<String>,
+) -> Result<ProfileImportResult> {
+    if relay_urls.is_empty() {
+        bail!("at least one relay is required");
+    }
+    let Some(share) = draft.share_packages.iter().find(|share| share.idx == member_idx) else {
+        bail!("generated share {member_idx} not found");
+    };
+    let local_pubkey = derive_member_pubkey_hex(share.seckey)?;
+    let share_secret_hex = hex::encode(share.seckey);
+    let payload = BfProfilePayload {
+        profile_id: derive_profile_id_for_share_secret(&share_secret_hex)?,
+        version: 1,
+        device: BfProfileDevice {
+            name: label.clone(),
+            share_secret: share_secret_hex,
+            manual_peer_policy_overrides: draft
+                .group
+                .members
+                .iter()
+                .map(|member| hex::encode(&member.pubkey[1..]))
+                .filter(|pubkey| pubkey != &local_pubkey)
+                .map(|pubkey| BfManualPeerPolicyOverride {
+                    pubkey,
+                    policy: core_peer_policy_override_to_bf(&PeerPolicyOverride::from_peer_policy(
+                        &PeerPolicy::default(),
+                    )),
+                })
+                .collect(),
+            remote_peer_policy_observations: Vec::new(),
+            relays: relay_urls,
+        },
+        group: BfProfileGroup {
+            keyset_name: draft.keyset_name.clone(),
+            group_public_key: hex::encode(draft.group.group_pk),
+            threshold: draft.group.threshold,
+            total_count: draft.group.members.len() as u16,
+            members: draft
+                .group
+                .members
+                .iter()
+                .map(|member| frostr_utils::BfGroupMember {
+                    index: member.idx,
+                    share_public_key: hex::encode(&member.pubkey[1..]),
+                })
+                .collect(),
+        },
+    };
+    import_profile_from_bfprofile_payload(paths, payload, Some(label), None, vault_passphrase)
+}
+
+pub fn export_generated_onboarding_package(
+    draft: &GeneratedKeysetDraft,
+    member_idx: u16,
+    relays: Vec<String>,
+    peer_pubkey: String,
+    package_password: String,
+) -> Result<String> {
+    if relays.is_empty() {
+        bail!("at least one relay is required");
+    }
+    let Some(share) = draft.share_packages.iter().find(|share| share.idx == member_idx) else {
+        bail!("generated share {member_idx} not found");
+    };
+    encode_bfonboard_package(
+        &BfOnboardPayload {
+            share_secret: hex::encode(share.seckey),
+            relays,
+            peer_pk: peer_pubkey,
+        },
+        &package_password,
+    )
+    .context("encode bfonboard package")
+}
+
+fn profile_to_package_payload(
+    paths: &ShellPaths,
+    profile_id: &str,
+    vault_passphrase: Option<String>,
+) -> Result<BfProfilePayload> {
+    let profile = read_profile(paths, profile_id)?;
+    let (manifest, resolved) = resolve_profile_runtime_with_passphrase(paths, profile_id, vault_passphrase)?;
+    let manual_peer_policy_overrides = resolved
+        .manual_policy_overrides
+        .iter()
+        .map(|(pubkey, policy_override)| BfManualPeerPolicyOverride {
+            pubkey: pubkey.clone(),
+            policy: core_peer_policy_override_to_bf(policy_override),
+        })
+        .collect::<Vec<_>>();
+    Ok(BfProfilePayload {
+        profile_id: profile.id.clone(),
+        version: 1,
+        device: BfProfileDevice {
+            name: manifest.label,
+            share_secret: hex::encode(resolved.share.seckey),
+            manual_peer_policy_overrides,
+            remote_peer_policy_observations: Vec::new(),
+            relays: resolved.relays,
+        },
+        group: BfProfileGroup {
+            keyset_name: profile.label,
+            group_public_key: hex::encode(resolved.group.group_pk),
+            threshold: resolved.group.threshold,
+            total_count: resolved.group.members.len() as u16,
+            members: resolved
+                .group
+                .members
+                .iter()
+                .map(|member| BfPeerlessGroupMember(member))
+                .map(|member| member.into())
+                .collect(),
+        },
+    })
+}
+
+fn preview_from_profile_payload(
+    payload: &BfProfilePayload,
+    label: Option<String>,
+    source: &'static str,
+) -> Result<ProfilePreview> {
+    let share_public_key = derive_member_pubkey_hex(hex_to_bytes32(&payload.device.share_secret)?)?;
+    Ok(ProfilePreview {
+        profile_id: payload.profile_id.clone(),
+        label: label.unwrap_or_else(|| payload.device.name.clone()),
+        share_public_key,
+        group_public_key: payload.group.group_public_key.clone(),
+        threshold: payload.group.threshold as usize,
+        total_count: payload.group.total_count as usize,
+        relays: payload.device.relays.clone(),
+        peer_pubkey: None,
+        source,
+    })
+}
+
+fn preview_from_bootstrap_completion(
+    completion: &BootstrapImportResult,
+    label: Option<String>,
+    source: &'static str,
+    peer_pubkey: Option<String>,
+) -> Result<ProfilePreview> {
+    let share_public_key = derive_member_pubkey_hex(completion.share.seckey)?;
+    Ok(ProfilePreview {
+        profile_id: derive_profile_id_for_share_secret(&hex::encode(completion.share.seckey))?,
+        label: label.unwrap_or_else(|| format!("Onboarded Device {}", completion.share.idx)),
+        share_public_key,
+        group_public_key: hex::encode(completion.group.group_pk),
+        threshold: completion.group.threshold as usize,
+        total_count: completion.group.members.len(),
+        relays: completion.relays.clone(),
+        peer_pubkey,
+        source,
+    })
+}
+
+struct BfPeerlessGroupMember<'a>(&'a bifrost_core::types::MemberPackage);
+
+impl From<BfPeerlessGroupMember<'_>> for frostr_utils::BfGroupMember {
+    fn from(value: BfPeerlessGroupMember<'_>) -> Self {
+        Self {
+            index: value.0.idx,
+            share_public_key: hex::encode(&value.0.pubkey[1..]),
+        }
+    }
+}
+
+fn build_policy_overrides_value(policies: &[BfManualPeerPolicyOverride]) -> Result<Value> {
+    serde_json::to_value(PolicyOverridesDocument {
+        default_override: None,
+        peer_overrides: policies
+            .iter()
+            .map(|policy| PolicyOverrideEntry {
+                pubkey: policy.pubkey.clone(),
+                policy_override: PeerPolicyOverride {
+                    request: bifrost_core::types::MethodPolicyOverride {
+                        echo: match policy.policy.request.echo {
+                            frostr_utils::BfPolicyOverrideValue::Unset => PolicyOverrideValue::Unset,
+                            frostr_utils::BfPolicyOverrideValue::Allow => PolicyOverrideValue::Allow,
+                            frostr_utils::BfPolicyOverrideValue::Deny => PolicyOverrideValue::Deny,
+                        },
+                        ping: match policy.policy.request.ping {
+                            frostr_utils::BfPolicyOverrideValue::Unset => PolicyOverrideValue::Unset,
+                            frostr_utils::BfPolicyOverrideValue::Allow => PolicyOverrideValue::Allow,
+                            frostr_utils::BfPolicyOverrideValue::Deny => PolicyOverrideValue::Deny,
+                        },
+                        onboard: match policy.policy.request.onboard {
+                            frostr_utils::BfPolicyOverrideValue::Unset => PolicyOverrideValue::Unset,
+                            frostr_utils::BfPolicyOverrideValue::Allow => PolicyOverrideValue::Allow,
+                            frostr_utils::BfPolicyOverrideValue::Deny => PolicyOverrideValue::Deny,
+                        },
+                        sign: match policy.policy.request.sign {
+                            frostr_utils::BfPolicyOverrideValue::Unset => PolicyOverrideValue::Unset,
+                            frostr_utils::BfPolicyOverrideValue::Allow => PolicyOverrideValue::Allow,
+                            frostr_utils::BfPolicyOverrideValue::Deny => PolicyOverrideValue::Deny,
+                        },
+                        ecdh: match policy.policy.request.ecdh {
+                            frostr_utils::BfPolicyOverrideValue::Unset => PolicyOverrideValue::Unset,
+                            frostr_utils::BfPolicyOverrideValue::Allow => PolicyOverrideValue::Allow,
+                            frostr_utils::BfPolicyOverrideValue::Deny => PolicyOverrideValue::Deny,
+                        },
+                    },
+                    respond: bifrost_core::types::MethodPolicyOverride {
+                        echo: match policy.policy.respond.echo {
+                            frostr_utils::BfPolicyOverrideValue::Unset => PolicyOverrideValue::Unset,
+                            frostr_utils::BfPolicyOverrideValue::Allow => PolicyOverrideValue::Allow,
+                            frostr_utils::BfPolicyOverrideValue::Deny => PolicyOverrideValue::Deny,
+                        },
+                        ping: match policy.policy.respond.ping {
+                            frostr_utils::BfPolicyOverrideValue::Unset => PolicyOverrideValue::Unset,
+                            frostr_utils::BfPolicyOverrideValue::Allow => PolicyOverrideValue::Allow,
+                            frostr_utils::BfPolicyOverrideValue::Deny => PolicyOverrideValue::Deny,
+                        },
+                        onboard: match policy.policy.respond.onboard {
+                            frostr_utils::BfPolicyOverrideValue::Unset => PolicyOverrideValue::Unset,
+                            frostr_utils::BfPolicyOverrideValue::Allow => PolicyOverrideValue::Allow,
+                            frostr_utils::BfPolicyOverrideValue::Deny => PolicyOverrideValue::Deny,
+                        },
+                        sign: match policy.policy.respond.sign {
+                            frostr_utils::BfPolicyOverrideValue::Unset => PolicyOverrideValue::Unset,
+                            frostr_utils::BfPolicyOverrideValue::Allow => PolicyOverrideValue::Allow,
+                            frostr_utils::BfPolicyOverrideValue::Deny => PolicyOverrideValue::Deny,
+                        },
+                        ecdh: match policy.policy.respond.ecdh {
+                            frostr_utils::BfPolicyOverrideValue::Unset => PolicyOverrideValue::Unset,
+                            frostr_utils::BfPolicyOverrideValue::Allow => PolicyOverrideValue::Allow,
+                            frostr_utils::BfPolicyOverrideValue::Deny => PolicyOverrideValue::Deny,
+                        },
+                    },
+                },
+            })
+            .collect(),
+    })
+    .context("serialize policy overrides")
+}
+
+fn write_package_output(out_path: Option<&Path>, package: &str) -> Result<()> {
+    if let Some(path) = out_path {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        }
+        fs::write(path, package).with_context(|| format!("write {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn hex_to_bytes32(value: &str) -> Result<[u8; 32]> {
+    let bytes = hex::decode(value).with_context(|| format!("decode hex32 {value}"))?;
+    if bytes.len() != 32 {
+        bail!("expected 32-byte hex value");
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+fn find_member_index_for_share_secret(
+    group: &bifrost_core::types::GroupPackage,
+    share_secret: &str,
+) -> Result<u16> {
+    let local_pubkey = derive_member_pubkey_hex(hex_to_bytes32(share_secret)?)?;
+    group
+        .members
+        .iter()
+        .find(|member| hex::encode(&member.pubkey[1..]) == local_pubkey)
+        .map(|member| member.idx)
+        .ok_or_else(|| anyhow!("share secret does not match any group member"))
+}
+
+fn resolve_profile_runtime_with_passphrase(
+    paths: &ShellPaths,
+    profile_id: &str,
+    vault_passphrase: Option<String>,
+) -> Result<(ProfileManifest, ResolvedAppConfig)> {
+    let profile = read_profile(paths, profile_id)?;
+    let relay_profile = read_relay_profile(paths, &profile.relay_profile)?;
+    let group_raw = fs::read_to_string(&profile.group_ref)
+        .with_context(|| format!("read {}", profile.group_ref))?;
+    let share_raw = load_share_payload_with_passphrase(paths, &profile, vault_passphrase)?;
+    let group = parse_group_package(&group_raw).context("parse profile group package")?;
+    let share = parse_share_package(&share_raw).context("parse profile share package")?;
+    let (peers, manual_policy_overrides) =
+        resolve_profile_peers_and_overrides(&group, &share, profile.policy_overrides.clone())
+        .context("resolve peer policy overrides")?;
+    let remote_policy_observations =
+        parse_remote_policy_observations_doc(profile.remote_policy_observations.clone())
+            .context("resolve remote policy observations")?;
+    let options: AppOptions = if profile.runtime_options.is_null() {
+        AppOptions::default()
+    } else {
+        serde_json::from_value(profile.runtime_options.clone()).context("parse runtime options")?
+    };
+    Ok((
+        profile.clone(),
+        ResolvedAppConfig {
+            group,
+            share,
+            state_path: PathBuf::from(&profile.state_path),
+            relays: relay_profile.relays,
+            peers,
+            manual_policy_overrides,
+            remote_policy_observations,
+            options,
+        },
+    ))
+}
+
+async fn publish_nostr_event(relays: &[String], event: &Event) -> Result<()> {
+    let event_value = serde_json::to_value(event).context("serialize nostr event")?;
+    let payload = serde_json::json!(["EVENT", event_value]).to_string();
+    let mut published = false;
+    for relay in relays {
+        let attempt = async {
+            let (mut stream, _) = timeout(
+                TokioDuration::from_secs(3),
+                connect_async(relay.as_str()),
+            )
+            .await
+            .map_err(|_| anyhow!("timed out connecting to relay"))??;
+            stream.send(Message::Text(payload.clone().into())).await?;
+            while let Some(message) = timeout(TokioDuration::from_secs(3), stream.next())
+                .await
+                .map_err(|_| anyhow!("timed out waiting for relay acknowledgement"))?
+            {
+                let message = message?;
+                if let Message::Text(text) = message {
+                    let value: Value = serde_json::from_str(&text).context("parse relay response")?;
+                    if let Some(array) = value.as_array() {
+                        match array.first().and_then(Value::as_str) {
+                            Some("OK") => {
+                                let ok = array.get(2).and_then(Value::as_bool).unwrap_or(false);
+                                if !ok {
+                                    bail!("relay rejected backup event");
+                                }
+                                return Ok(());
+                            }
+                            Some("NOTICE") => bail!(
+                                "{}",
+                                array
+                                    .get(1)
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("relay notice")
+                            ),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            bail!("relay closed before confirming backup event")
+        }
+        .await;
+        if attempt.is_ok() {
+            published = true;
+            break;
+        }
+    }
+    if !published {
+        bail!("failed to publish encrypted profile backup to configured relays");
+    }
+    Ok(())
+}
+
+async fn probe_relays(relays: &[String]) -> Vec<RelayProbeResult> {
+    let mut results = Vec::with_capacity(relays.len());
+    for relay in relays {
+        let outcome = match connect_async(relay.as_str()).await {
+            Ok((stream, _)) => {
+                let mut stream = stream;
+                let _ = stream.close(None).await;
+                RelayProbeResult {
+                    relay: relay.clone(),
+                    ok: true,
+                    error: None,
+                }
+            }
+            Err(err) => RelayProbeResult {
+                relay: relay.clone(),
+                ok: false,
+                error: Some(err.to_string()),
+            },
+        };
+        results.push(outcome);
+    }
+    results
+}
+
+async fn fetch_latest_nostr_event(relays: &[String], author_pubkey: &str, kind: u16) -> Result<Event> {
+    let subscription_id = format!("igloo-shell-{}", now_unix_secs());
+    let filter = serde_json::json!({
+        "authors": [author_pubkey],
+        "kinds": [kind],
+    });
+    let request = serde_json::json!(["REQ", subscription_id, filter]).to_string();
+    let close = serde_json::json!(["CLOSE", subscription_id]).to_string();
+    let mut best: Option<Event> = None;
+    for relay in relays {
+        let attempt = async {
+            let (mut stream, _) = connect_async(relay.as_str()).await?;
+            stream.send(Message::Text(request.clone().into())).await?;
+            while let Some(message) = tokio::time::timeout(Duration::from_secs(3), stream.next()).await? {
+                let message = message?;
+                if let Message::Text(text) = message {
+                    let value: Value = serde_json::from_str(&text).context("parse relay event")?;
+                    let Some(array) = value.as_array() else {
+                        continue;
+                    };
+                    match array.first().and_then(Value::as_str) {
+                        Some("EVENT") => {
+                            if let Some(event_value) = array.get(2) {
+                                let event: Event = serde_json::from_value(event_value.clone())
+                                    .context("decode nostr event")?;
+                                if best
+                                    .as_ref()
+                                    .map(|existing| event.created_at > existing.created_at)
+                                    .unwrap_or(true)
+                                {
+                                    best = Some(event);
+                                }
+                            }
+                        }
+                        Some("EOSE") => break,
+                        Some("NOTICE") => break,
+                        _ => {}
+                    }
+                }
+            }
+            let _ = stream.send(Message::Text(close.clone().into())).await;
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        let _ = attempt;
+    }
+    best.ok_or_else(|| anyhow!("no encrypted profile backup was found for this share"))
+}
+
+pub async fn run_setup(
+    paths: &ShellPaths,
+    request: SetupRequest,
+    start_daemon: bool,
+) -> Result<SetupResult> {
     let import = match (
         request.group_path.as_deref(),
         request.share_path.as_deref(),
@@ -962,7 +2199,9 @@ pub async fn run_setup(paths: &ShellPaths, request: SetupRequest, start_daemon: 
             )
             .await?
         }
-        _ => bail!("setup requires either --group and --share, or --onboarding-package"),
+        _ => bail!(
+            "setup requires both --group and --share; use `igloo-shell onboard` for onboarding packages"
+        ),
     };
 
     let daemon = if start_daemon {
@@ -1011,7 +2250,9 @@ pub fn remove_relays(paths: &ShellPaths, profile_id: &str, relays: &[String]) ->
     let Some(profile) = profiles.iter_mut().find(|entry| entry.id == profile_id) else {
         bail!("unknown relay profile {profile_id}");
     };
-    profile.relays.retain(|relay| !relays.iter().any(|value| value == relay));
+    profile
+        .relays
+        .retain(|relay| !relays.iter().any(|value| value == relay));
     validate_relay_profile(profile)?;
     save_relay_profiles(paths, &profiles)
 }
@@ -1092,7 +2333,10 @@ fn ensure_onboarding_relay_profile(
     Ok(profile_id)
 }
 
-fn store_group_package(paths: &ShellPaths, group: &bifrost_core::types::GroupPackage) -> Result<String> {
+fn store_group_package(
+    paths: &ShellPaths,
+    group: &bifrost_core::types::GroupPackage,
+) -> Result<String> {
     let path = paths
         .groups_dir
         .join(format!("{}.json", hex::encode(group.group_pk)));
@@ -1120,9 +2364,10 @@ fn build_profile_manifest(
         relay_profile,
         runtime_options: Value::Null,
         policy_overrides: serde_json::json!({
-            "default_policy": PeerPolicy::default(),
+            "default_override": null,
             "peer_overrides": []
         }),
+        remote_policy_observations: Value::Array(Vec::new()),
         state_path: state_dir.join("signer-state.bin").display().to_string(),
         daemon_socket_path: state_dir.join("daemon.sock").display().to_string(),
         created_at,
@@ -1133,46 +2378,61 @@ fn build_profile_manifest(
 fn parse_policy_overrides_doc(value: Value) -> Result<PolicyOverridesDocument> {
     if value.is_null() {
         return Ok(PolicyOverridesDocument {
-            default_policy: None,
+            default_override: None,
             peer_overrides: Vec::new(),
         });
     }
-
-    if let Ok(peer_overrides) = serde_json::from_value::<Vec<PeerConfig>>(value.clone()) {
-        return Ok(PolicyOverridesDocument {
-            default_policy: None,
-            peer_overrides,
-        });
-    }
-
     serde_json::from_value(value).context("parse policy overrides document")
 }
 
-fn resolve_policy_peers(
+fn parse_remote_policy_observations_doc(
+    value: Value,
+) -> Result<HashMap<String, bifrost_core::types::PeerScopedPolicyProfile>> {
+    if value.is_null() {
+        return Ok(HashMap::new());
+    }
+    let observations: Vec<BfRemotePeerPolicyObservation> =
+        serde_json::from_value(value).context("parse remote policy observations")?;
+    let mut remote_policy_observations = HashMap::new();
+    for observation in observations {
+        remote_policy_observations.insert(
+            observation.pubkey.clone(),
+            bf_peer_scoped_policy_profile_to_core(&observation.profile)
+                .with_context(|| format!("parse remote policy observation {}", observation.pubkey))?,
+        );
+    }
+    Ok(remote_policy_observations)
+}
+
+fn build_remote_policy_observations_value(
+    observations: &[BfRemotePeerPolicyObservation],
+) -> Result<Value> {
+    serde_json::to_value(observations).context("serialize remote policy observations")
+}
+
+fn resolve_profile_peers_and_overrides(
     group: &bifrost_core::types::GroupPackage,
     share: &bifrost_core::types::SharePackage,
     value: Value,
-) -> Result<Vec<PeerConfig>> {
+) -> Result<(Vec<String>, HashMap<String, PeerPolicyOverride>)> {
     let document = parse_policy_overrides_doc(value)?;
     let local_pubkey = derive_member_pubkey_hex(share.seckey)?;
-    let mut peers = document.peer_overrides;
+    let peer_keys = group
+        .members
+        .iter()
+        .map(|member| hex::encode(&member.pubkey[1..]))
+        .filter(|pubkey| pubkey != &local_pubkey)
+        .collect::<Vec<_>>();
 
-    if let Some(default_policy) = document.default_policy {
-        for member in &group.members {
-            let pubkey = hex::encode(&member.pubkey[1..]);
-            if pubkey == local_pubkey || peers.iter().any(|peer| peer.pubkey == pubkey) {
-                continue;
-            }
-            peers.push(PeerConfig {
-                pubkey,
-                policy: default_policy.clone(),
-            });
-        }
+    let mut peers = Vec::with_capacity(peer_keys.len());
+    let mut manual_policy_overrides = HashMap::new();
+    for pubkey in peer_keys {
+        let effective_override = effective_policy_override(&document, &pubkey);
+        manual_policy_overrides.insert(pubkey.clone(), effective_override);
+        peers.push(pubkey);
     }
-
-    peers.sort_by(|a, b| a.pubkey.cmp(&b.pubkey));
-    peers.dedup_by(|a, b| a.pubkey == b.pubkey);
-    Ok(peers)
+    peers.sort();
+    Ok((peers, manual_policy_overrides))
 }
 
 fn derive_member_pubkey_hex(seckey: [u8; 32]) -> Result<String> {
@@ -1181,29 +2441,15 @@ fn derive_member_pubkey_hex(seckey: [u8; 32]) -> Result<String> {
     Ok(hex::encode(&point.as_bytes()[1..]))
 }
 
-fn generate_profile_id(label: Option<&str>) -> String {
-    let base = label
-        .map(slugify)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "profile".to_string());
-    format!("{base}-{}", now_unix_secs())
+fn derive_profile_id_for_share_secret(share_secret_hex: &str) -> Result<String> {
+    derive_profile_id_from_share_secret(share_secret_hex).context("derive profile id")
 }
 
-fn slugify(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .split('-')
-        .filter(|segment| !segment.is_empty())
-        .collect::<Vec<_>>()
-        .join("-")
+fn ensure_profile_id_unused(paths: &ShellPaths, profile_id: &str) -> Result<()> {
+    if paths.profile_path(profile_id).exists() {
+        bail!("profile {} already exists", profile_id);
+    }
+    Ok(())
 }
 
 fn store_secret_payload(
@@ -1303,6 +2549,24 @@ fn load_share_payload_with_passphrase(
     fs::read_to_string(&profile.share_ref).with_context(|| format!("read {}", profile.share_ref))
 }
 
+fn validate_profile_unlock(
+    paths: &ShellPaths,
+    profile: &ProfileManifest,
+    passphrase: Option<String>,
+) -> Result<()> {
+    let _ = load_share_payload_with_passphrase(paths, profile, passphrase)?;
+    Ok(())
+}
+
+pub fn validate_profile_unlock_with_passphrase(
+    paths: &ShellPaths,
+    profile_id: &str,
+    passphrase: Option<String>,
+) -> Result<()> {
+    let profile = read_profile(paths, profile_id)?;
+    validate_profile_unlock(paths, &profile, passphrase)
+}
+
 fn is_group_ref_in_use(
     paths: &ShellPaths,
     exclude_profile_id: &str,
@@ -1313,7 +2577,11 @@ fn is_group_ref_in_use(
         .any(|profile| profile.id != exclude_profile_id && profile.group_ref == group_ref))
 }
 
-fn is_vault_ref_in_use(paths: &ShellPaths, exclude_profile_id: &str, vault_id: &str) -> Result<bool> {
+fn is_vault_ref_in_use(
+    paths: &ShellPaths,
+    exclude_profile_id: &str,
+    vault_id: &str,
+) -> Result<bool> {
     Ok(list_profiles(paths)?
         .into_iter()
         .any(|profile| profile.id != exclude_profile_id && profile.share_ref == vault_id))
@@ -1323,7 +2591,8 @@ fn remove_vault_record(paths: &ShellPaths, vault_id: &str) -> Result<()> {
     let record = read_vault_record(paths, vault_id)?;
     let metadata_path = paths.vault_metadata_path(vault_id);
     if metadata_path.exists() {
-        fs::remove_file(&metadata_path).with_context(|| format!("remove {}", metadata_path.display()))?;
+        fs::remove_file(&metadata_path)
+            .with_context(|| format!("remove {}", metadata_path.display()))?;
     }
     if Path::new(&record.ciphertext_path).exists() {
         fs::remove_file(&record.ciphertext_path)
@@ -1370,8 +2639,9 @@ fn finalize_onboarding_import(
     vault_record: VaultRecord,
 ) -> Result<ProfileImportResult> {
     let now = now_unix_secs();
+    let profile_id = derive_profile_id_for_share_secret(&hex::encode(completion.share.seckey))?;
+    ensure_profile_id_unused(paths, &profile_id)?;
     let group_ref = store_group_package(paths, &completion.group)?;
-    let profile_id = generate_profile_id(label.as_deref());
     let profile = build_profile_manifest(
         paths,
         &profile_id,
@@ -1383,15 +2653,16 @@ fn finalize_onboarding_import(
     );
     fs::create_dir_all(paths.profile_state_dir(&profile.id))
         .with_context(|| format!("create {}", paths.profile_state_dir(&profile.id).display()))?;
-    let diagnostics = match persist_validated_onboarding_state(Path::new(&profile.state_path), &completion) {
-        Ok(report) => report,
-        Err(error) => {
-            let _ = fs::remove_file(&profile.group_ref);
-            let _ = remove_vault_record(paths, &vault_record.id);
-            let _ = fs::remove_dir_all(paths.profile_state_dir(&profile.id));
-            return Err(error);
-        }
-    };
+    let diagnostics =
+        match persist_validated_onboarding_state(Path::new(&profile.state_path), &completion) {
+            Ok(report) => report,
+            Err(error) => {
+                let _ = fs::remove_file(&profile.group_ref);
+                let _ = remove_vault_record(paths, &vault_record.id);
+                let _ = fs::remove_dir_all(paths.profile_state_dir(&profile.id));
+                return Err(error);
+            }
+        };
     write_profile(paths, &profile)?;
     touch_last_used_profile(paths, &profile.id)?;
 
@@ -1411,7 +2682,10 @@ fn validate_relay_profile(profile: &RelayProfile) -> Result<()> {
         bail!("relay profile label must be non-empty");
     }
     if profile.relays.is_empty() {
-        bail!("relay profile {} must contain at least one relay", profile.id);
+        bail!(
+            "relay profile {} must contain at least one relay",
+            profile.id
+        );
     }
     Ok(())
 }
@@ -1432,16 +2706,12 @@ fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(unix)]
-    use bifrost_app::host::{ControlCommand, run_resolved_daemon};
-    use bifrost_signer::{DeviceState, DeviceStore};
-    use bifrost_core::types::{GroupPackage, MemberPackage, SharePackage};
     use bifrost_codec::wire::{GroupPackageWire, SharePackageWire};
-    use frostr_utils::{CreateKeysetConfig, OnboardingPackage, create_keyset, encode_onboarding_package};
-    #[cfg(unix)]
-    use crate::relay::NostrRelay;
-    #[cfg(unix)]
-    use std::net::TcpListener;
+    use bifrost_core::types::{GroupPackage, MemberPackage, SharePackage};
+    use bifrost_signer::{DeviceState, DeviceStore};
+    use frostr_utils::{
+        BfOnboardPayload, CreateKeysetConfig, create_keyset, encode_bfonboard_package,
+    };
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -1540,20 +2810,31 @@ mod tests {
         fs::create_dir_all(paths.profile_state_dir(&profile.id)).expect("create state dir");
         write_profile(&paths, &profile).expect("write profile");
 
-        let policy = PeerPolicy::from_send_receive(false, true);
-        let updated = set_profile_peer_policy(&paths, "alice", "deadbeef", policy.clone())
-            .expect("persist peer policy");
-        let document = parse_policy_overrides_doc(updated.policy_overrides).expect("parse policy overrides");
+        let (updated, effective_override) = set_profile_peer_policy_override(
+            &paths,
+            "alice",
+            "deadbeef",
+            PolicyDirection::Request,
+            PolicyMethod::Sign,
+            PolicyOverrideValue::Deny,
+        )
+        .expect("persist peer policy");
+        let document =
+            parse_policy_overrides_doc(updated.policy_overrides).expect("parse policy overrides");
         assert_eq!(document.peer_overrides.len(), 1);
         assert_eq!(document.peer_overrides[0].pubkey, "deadbeef");
-        assert_eq!(document.peer_overrides[0].policy, policy);
+        assert_eq!(
+            document.peer_overrides[0].policy_override.request.sign,
+            PolicyOverrideValue::Deny
+        );
+        assert_eq!(effective_override.request.sign, PolicyOverrideValue::Deny);
 
         let (cleared, effective_policy) =
             clear_profile_peer_policy(&paths, "alice", "deadbeef").expect("clear peer policy");
         let cleared_doc =
             parse_policy_overrides_doc(cleared.policy_overrides).expect("parse cleared overrides");
         assert!(cleared_doc.peer_overrides.is_empty());
-        assert_eq!(effective_policy, PeerPolicy::default());
+        assert_eq!(effective_policy, PeerPolicyOverride::default());
     }
 
     #[tokio::test]
@@ -1587,15 +2868,12 @@ mod tests {
             .iter()
             .find(|member| member.idx == 1)
             .expect("alice member");
-        let package = OnboardingPackage {
-            share: share.clone(),
-            peer_pk: inviter.pubkey[1..].try_into().expect("xonly inviter"),
+        let package = BfOnboardPayload {
+            share_secret: hex::encode(share.seckey),
+            peer_pk: hex::encode(&inviter.pubkey[1..]),
             relays: vec!["ws://127.0.0.1:8194".to_string()],
-            challenge: Some([7u8; 32]),
-            created_at: Some(10),
-            expires_at: Some(20),
         };
-        let encoded = encode_onboarding_package(&package, "test-password").expect("encode");
+        let encoded = encode_bfonboard_package(&package, "test-password").expect("encode");
         let onboarding_nonce = bifrost_core::types::DerivedPublicNonce {
             binder_pn: [4u8; 33],
             hidden_pn: [5u8; 33],
@@ -1624,12 +2902,12 @@ mod tests {
                     share: share.clone(),
                     relays: vec!["ws://127.0.0.1:8194".to_string()],
                     peer_pubkey: hex::encode(&inviter.pubkey[1..]),
-                    challenge: Some([7u8; 32]),
                     group_member_count: group.members.len(),
                     bootstrap_nonces: vec![onboarding_nonce.clone()],
                     bootstrap_state: bifrost_app::onboarding::BootstrapStateSnapshot {
                         device_state_hex: hex::encode(
-                            bincode::serialize(&onboarding_state).expect("serialize bootstrap state")
+                            bincode::serialize(&onboarding_state)
+                                .expect("serialize bootstrap state"),
                         ),
                     },
                 })
@@ -1649,12 +2927,16 @@ mod tests {
 
         assert_eq!(profile.share_ref, vault_record.id);
         assert!(Path::new(&profile.group_ref).exists());
-        let share_raw = load_share_payload_with_passphrase(&paths, &profile, Some("vault-pass".to_string()))
-            .expect("decrypt share payload");
+        let share_raw =
+            load_share_payload_with_passphrase(&paths, &profile, Some("vault-pass".to_string()))
+                .expect("decrypt share payload");
         let parsed_share = parse_share_package(&share_raw).expect("parse stored share");
         assert_eq!(parsed_share.idx, share.idx);
         assert!(read_vault_record(&paths, &vault_record.id).is_ok());
-        let store = bifrost_app::runtime::EncryptedFileStore::new(PathBuf::from(&profile.state_path), share.clone());
+        let store = bifrost_app::runtime::EncryptedFileStore::new(
+            PathBuf::from(&profile.state_path),
+            share.clone(),
+        );
         let state = store.load().expect("load saved onboarding state");
         let peer_stats = state.nonce_pool.peer_stats(1);
         assert_eq!(peer_stats.incoming_available, 1);
@@ -1675,32 +2957,16 @@ mod tests {
         assert!(runtime_peer_stats.outgoing_available >= 4);
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn daemon_invite_lifecycle_round_trip() {
-        let paths = test_paths("daemon-invite-lifecycle");
+    #[test]
+    fn bfprofile_export_and_import_round_trip() {
+        let paths = test_paths("bfprofile-roundtrip");
         paths.ensure().expect("ensure shell paths");
-        unsafe {
-            std::env::set_var(VAULT_ENV_PASSPHRASE, "vault-pass");
-        }
-
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test port");
-        let relay_port = listener.local_addr().expect("local addr").port();
-        drop(listener);
-        let relay_url = format!("ws://127.0.0.1:{relay_port}");
-
-        let relay = NostrRelay::new("127.0.0.1", relay_port, None);
-        let relay_task = tokio::spawn(async move {
-            let _ = relay.start().await;
-        });
-        tokio::time::sleep(Duration::from_millis(200)).await;
-
         replace_relay_profile(
             &paths,
             RelayProfile {
                 id: "local".to_string(),
                 label: "Local".to_string(),
-                relays: vec![relay_url.clone()],
+                relays: vec!["ws://127.0.0.1:8194".to_string()],
             },
         )
         .expect("write relay profile");
@@ -1723,92 +2989,42 @@ mod tests {
             Some("local".to_string()),
             Some("vault-pass".to_string()),
         )
-        .expect("import profile");
+        .expect("import raw profile");
         let ProfileImportResult::ProfileCreated { profile, .. } = import else {
             panic!("expected profile created");
         };
 
-        let transport = build_daemon_transport(&profile);
-        let metadata = DaemonMetadata {
-            profile_id: profile.id.clone(),
-            pid: std::process::id(),
-            socket_path: transport.socket_path.display().to_string(),
-            token: transport.token.clone(),
-            log_path: paths.daemon_log_path(&profile.id).display().to_string(),
-            started_at: now_unix_secs(),
+        let exported = export_profile_as_bfprofile(
+            &paths,
+            &profile.id,
+            "package-pass".to_string(),
+            Some("vault-pass".to_string()),
+            None,
+        )
+        .expect("export bfprofile");
+        let imported = import_profile_from_bfprofile_value(
+            &paths,
+            &exported.package,
+            "package-pass".to_string(),
+            Some("Recovered".to_string()),
+            Some("local".to_string()),
+            Some("vault-pass".to_string()),
+        )
+        .expect("import bfprofile");
+
+        let ProfileImportResult::ProfileCreated { profile, .. } = imported else {
+            panic!("expected imported profile created");
         };
-        write_daemon_metadata(&paths, &profile.id, &metadata).expect("write daemon metadata");
-
-        let (_, resolved) = resolve_profile_runtime(&paths, &profile.id).expect("resolve profile runtime");
-        let daemon_task = tokio::spawn(async move {
-            let _ = run_resolved_daemon(resolved, transport).await;
-        });
-
-        let mut ready = false;
-        for _ in 0..50 {
-            if daemon_runtime_query(&paths, &profile.id, ControlCommand::RuntimeMetadata)
-                .await
-                .is_ok()
-            {
-                ready = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        assert!(ready, "daemon did not become ready");
-
-        let created = daemon_runtime_query(
+        assert_eq!(profile.label, "Recovered");
+        let report = doctor_profile(&paths, &profile).expect("doctor profile");
+        assert!(report.group_present);
+        assert!(report.share_managed);
+        validate_profile_unlock_with_passphrase(
             &paths,
             &profile.id,
-            ControlCommand::InviteCreate {
-                relay_overrides: Vec::new(),
-                expires_in_secs: 60,
-                label: Some("test-invite".to_string()),
-            },
+            Some("vault-pass".to_string()),
         )
-        .await
-        .expect("create invite");
-        let token = created
-            .get("token")
-            .and_then(Value::as_str)
-            .expect("invite token");
-        assert!(!token.is_empty());
-
-        let listed = daemon_runtime_query(&paths, &profile.id, ControlCommand::InviteList)
-            .await
-            .expect("list invites");
-        let invites = listed.as_array().expect("invite array");
-        assert_eq!(invites.len(), 1);
-        let challenge = invites[0]
-            .get("challenge_hex")
-            .and_then(Value::as_str)
-            .expect("challenge hex")
-            .to_string();
-
-        let revoked = daemon_runtime_query(
-            &paths,
-            &profile.id,
-            ControlCommand::InviteRevoke {
-                challenge_hex32: challenge.clone(),
-            },
-        )
-        .await
-        .expect("revoke invite");
-        assert_eq!(
-            revoked.get("challenge_hex32").and_then(Value::as_str),
-            Some(challenge.as_str())
-        );
-
-        let listed_after = daemon_runtime_query(&paths, &profile.id, ControlCommand::InviteList)
-            .await
-            .expect("list invites after revoke");
-        assert_eq!(listed_after.as_array().expect("invite array").len(), 0);
-
-        let _ = stop_profile_daemon(&paths, &profile.id).await.expect("stop daemon");
-        let _ = tokio::time::timeout(Duration::from_secs(5), daemon_task).await;
-        relay_task.abort();
-        unsafe {
-            std::env::remove_var(VAULT_ENV_PASSPHRASE);
-        }
+        .expect("unlock imported bfprofile");
     }
+
 }

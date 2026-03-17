@@ -13,6 +13,7 @@ use serde_json::Value;
 pub struct TestHarness {
     root: PathBuf,
     bin: PathBuf,
+    devtools_bin: PathBuf,
     tag: String,
     relay_url: String,
     relay_child: Option<Child>,
@@ -51,9 +52,11 @@ impl TestHarness {
         drop(listener);
         let relay_url = format!("ws://127.0.0.1:{port}");
         let bin = PathBuf::from(env!("CARGO_BIN_EXE_igloo-shell"));
+        let devtools_bin = ensure_devtools_bin();
         Self {
             root,
             bin,
+            devtools_bin,
             tag: unique.to_string(),
             relay_url,
             relay_child: None,
@@ -162,12 +165,12 @@ impl TestHarness {
             .next()
             .expect("relay port")
             .to_string();
-        let child = Command::new(&self.bin)
-            .args(["dev", "relay", "--host", host, "--port", &port])
+        let child = Command::new(&self.devtools_bin)
+            .args(["relay", "--host", host, "--port", &port])
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(err))
             .spawn()
-            .expect("spawn relay");
+            .expect("spawn bifrost-devtools relay");
         self.relay_child = Some(child);
         let address = format!("{host}:{port}");
         let start = Instant::now();
@@ -183,18 +186,26 @@ impl TestHarness {
     pub fn keygen(&self, threshold: u16, count: u16) {
         let material_dir = self.material_dir();
         fs::create_dir_all(&material_dir).expect("create material dir");
-        self.run(&[
-            "dev",
-            "keygen",
-            "--out-dir",
-            path_arg(&material_dir),
-            "--threshold",
-            &threshold.to_string(),
-            "--count",
-            &count.to_string(),
-            "--relay",
-            self.relay_url(),
-        ]);
+        let output = Command::new(&self.devtools_bin)
+            .args([
+                "keygen",
+                "--out-dir",
+                path_arg(&material_dir),
+                "--threshold",
+                &threshold.to_string(),
+                "--count",
+                &count.to_string(),
+                "--relay",
+                self.relay_url(),
+            ])
+            .output()
+            .expect("run bifrost-devtools keygen");
+        assert!(
+            output.status.success(),
+            "keygen failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     pub fn set_relay_profile(&self, profile_id: &str) {
@@ -205,7 +216,6 @@ impl TestHarness {
         let label = self.unique_label(label);
         self.run_json_with_env(
             &[
-                "profile",
                 "import",
                 "--group",
                 path_arg(&self.material_dir().join("group.json")),
@@ -215,85 +225,106 @@ impl TestHarness {
                 &label,
                 "--relay-profile",
                 relay_profile,
+                "--vault-secret",
+                "vault-passphrase",
+                "--json",
             ],
-            &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+            &[],
         )
     }
 
-    pub fn import_onboarding_package(
+    pub fn onboard(
         &self,
         package_path: &Path,
         label: &str,
-        relay_profile: &str,
-        onboarding_password: &str,
+        onboarding_secret: &str,
+        vault_secret: &str,
     ) -> Value {
         let label = self.unique_label(label);
-        self.run_json_with_env(
-            &[
-                "profile",
-                "import",
-                "--onboarding-package",
-                path_arg(package_path),
-                "--label",
-                &label,
-                "--relay-profile",
-                relay_profile,
-            ],
-            &[
-                ("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase"),
-                ("IGLOO_SHELL_ONBOARDING_PASSWORD", onboarding_password),
-            ],
-        )
+        self.run_json(&[
+            "onboard",
+            path_arg(package_path),
+            "--onboard-secret",
+            onboarding_secret,
+            "--vault-secret",
+            vault_secret,
+            "--json",
+            "--label",
+            &label,
+        ])
     }
 
-    pub fn setup_onboarding_package(
+    pub fn onboard_inline(
+        &self,
+        package: &str,
+        label: &str,
+        onboarding_secret: &str,
+        vault_secret: &str,
+    ) -> Value {
+        let label = self.unique_label(label);
+        self.run_json(&[
+            "onboard",
+            package,
+            "--onboard-secret",
+            onboarding_secret,
+            "--vault-secret",
+            vault_secret,
+            "--json",
+            "--label",
+            &label,
+        ])
+    }
+
+    pub fn onboard_with_secret_files(
         &self,
         package_path: &Path,
         label: &str,
-        relay_profile: &str,
-        onboarding_password: &str,
+        onboarding_secret_file: &Path,
+        vault_secret_file: &Path,
     ) -> Value {
         let label = self.unique_label(label);
-        self.run_json_with_env(
-            &[
-                "setup",
-                "--onboarding-package",
-                path_arg(package_path),
-                "--label",
-                &label,
-                "--relay-profile",
-                relay_profile,
-                "--start-daemon",
-            ],
-            &[
-                ("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase"),
-                ("IGLOO_SHELL_ONBOARDING_PASSWORD", onboarding_password),
-            ],
-        )
+        self.run_json(&[
+            "onboard",
+            path_arg(package_path),
+            "--onboard-secret-file",
+            path_arg(onboarding_secret_file),
+            "--vault-secret-file",
+            path_arg(vault_secret_file),
+            "--json",
+            "--label",
+            &label,
+        ])
     }
 
-    pub fn assemble_onboarding_package(
+    pub fn export_bfonboard_package(
         &self,
-        token: &str,
+        profile_id: &str,
         share_name: &str,
         password: &str,
     ) -> String {
+        let out_path = self.root.join(format!("{profile_id}-{share_name}.bfonboard"));
         self.run_with_env(
             &[
-                "invite",
-                "assemble",
-                "--token",
-                token,
-                "--share",
+                "export",
+                profile_id,
+                "--format",
+                "bfonboard",
+                "--out",
+                path_arg(&out_path),
+                "--recipient-share",
                 path_arg(&self.material_dir().join(share_name)),
-                "--password-env",
-                "IGLOO_SHELL_ONBOARDING_PASSWORD",
+                "--package-password-env",
+                "IGLOO_SHELL_PACKAGE_PASSWORD",
             ],
-            &[("IGLOO_SHELL_ONBOARDING_PASSWORD", password)],
-        )
-        .stdout
-        .trim()
-        .to_string()
+            &[
+                ("IGLOO_SHELL_PACKAGE_PASSWORD", password),
+                ("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase"),
+            ],
+        );
+        fs::read_to_string(&out_path)
+            .expect("read bfonboard export")
+            .trim()
+            .to_string()
     }
 
     pub fn save_onboarding_package(&self, name: &str, package: &str) -> PathBuf {
@@ -340,19 +371,14 @@ impl TestHarness {
     pub fn wait_for_sign_ready(&self, profile_id: &str, timeout: Duration) {
         let start = Instant::now();
         while start.elapsed() < timeout {
-            let status = self.run_json_with_env(
-                &["runtime", "status", "--profile", profile_id],
-                &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
-            );
-            let readiness = status
-                .get("readiness")
-                .expect("runtime status readiness");
-            let sign_ready = readiness
-                .get("sign_ready")
+            let sign = self.run_check(profile_id, "sign");
+            let ecdh = self.run_check(profile_id, "ecdh");
+            let sign_ready = sign
+                .get("ready")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            let ecdh_ready = readiness
-                .get("ecdh_ready")
+            let ecdh_ready = ecdh
+                .get("ready")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             if sign_ready && ecdh_ready {
@@ -361,6 +387,13 @@ impl TestHarness {
             thread::sleep(Duration::from_millis(200));
         }
         panic!("timed out waiting for sign/ecdh readiness for {profile_id}");
+    }
+
+    pub fn run_check(&self, profile_id: &str, kind: &str) -> Value {
+        self.run_json_with_env(
+            &["check", kind, "--profile", profile_id],
+            &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+        )
     }
 
     pub fn render_args(&self, args: &[&str]) -> String {
@@ -397,7 +430,10 @@ impl TestHarness {
         let mut last_stderr = String::new();
         for _ in 0..3 {
             let output = self
-                .command_with_env(args, &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")])
+                .command_with_env(
+                    args,
+                    &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+                )
                 .output()
                 .expect("run daemon lifecycle command");
             last_stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -451,10 +487,47 @@ fn global_test_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+fn ensure_devtools_bin() -> PathBuf {
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        let infra_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(4)
+            .expect("resolve infra root")
+            .to_path_buf();
+        let bifrost_root = infra_root.join("repos/bifrost-rs");
+        let bin = bifrost_root.join("target/debug/bifrost-devtools");
+        if !bin.is_file() {
+            let status = Command::new("cargo")
+                .args([
+                    "build",
+                    "--manifest-path",
+                    path_arg(&bifrost_root.join("Cargo.toml")),
+                    "-p",
+                    "bifrost-devtools",
+                    "--bin",
+                    "bifrost-devtools",
+                    "--offline",
+                ])
+                .status()
+                .expect("build bifrost-devtools");
+            assert!(status.success(), "failed to build bifrost-devtools");
+        }
+        bin
+    })
+    .clone()
+}
+
 pub fn extract_profile_id(value: &Value) -> String {
     value
         .get("profile")
         .and_then(|profile| profile.get("id"))
+        .or_else(|| {
+            value
+                .get("import")
+                .and_then(|import| import.get("profile"))
+                .and_then(|profile| profile.get("id"))
+        })
         .and_then(Value::as_str)
         .or_else(|| value.get("id").and_then(Value::as_str))
         .map(ToString::to_string)
@@ -462,10 +535,11 @@ pub fn extract_profile_id(value: &Value) -> String {
 }
 
 pub fn extract_token(value: &Value) -> String {
-    value.get("token")
+    value
+        .get("token")
         .and_then(Value::as_str)
         .map(ToString::to_string)
-        .expect("extract invite token")
+        .expect("extract daemon token")
 }
 
 pub fn path_arg(path: &Path) -> &str {

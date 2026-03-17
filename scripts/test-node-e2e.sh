@@ -65,23 +65,16 @@ if [[ "${#SIGNATURE}" -ne 128 ]]; then
   exit 1
 fi
 
-INVITE_JSON="$(managed_shell_cmd invite create --profile "${ALICE_PROFILE_ID}" --label node-e2e)"
-TOKEN="$(printf '%s\n' "${INVITE_JSON}" | parse_json_field "token")"
-if [[ -z "${TOKEN}" ]]; then
-  echo "failed to parse invite token" >&2
-  printf '%s\n' "${INVITE_JSON}" >&2
+ONBOARD_PATH="${WORK_DIR}/node-e2e.bfonboard"
+IGLOO_SHELL_PACKAGE_PASSWORD="node-e2e-password" \
+  managed_shell_cmd export "${ALICE_PROFILE_ID}" \
+    --format bfonboard \
+    --out "${ONBOARD_PATH}" \
+    --recipient-share "${WORK_DIR}/material/share-bob.json" \
+    --package-password-env IGLOO_SHELL_PACKAGE_PASSWORD >/dev/null
+if [[ ! -s "${ONBOARD_PATH}" ]]; then
+  echo "failed to export canonical bfonboard package" >&2
   exit 1
 fi
-
-INVITE_LIST_JSON="$(managed_shell_cmd invite list --profile "${ALICE_PROFILE_ID}")"
-CHALLENGE="$(printf '%s\n' "${INVITE_LIST_JSON}" | parse_json_field "challenge_hex")"
-if [[ -z "${CHALLENGE}" ]]; then
-  echo "failed to parse invite challenge" >&2
-  printf '%s\n' "${INVITE_LIST_JSON}" >&2
-  exit 1
-fi
-
-managed_shell_cmd invite show --profile "${ALICE_PROFILE_ID}" "${CHALLENGE}" >/dev/null
-managed_shell_cmd invite revoke --profile "${ALICE_PROFILE_ID}" "${CHALLENGE}" >/dev/null
 
 echo "node e2e passed"

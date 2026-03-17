@@ -9,11 +9,11 @@ This document is the build-ready product and implementation specification for th
 - profile setup and import
 - runtime daemon lifecycle
 - peer diagnostics and protocol operations
-- invite-based onboarding
+- package-based onboarding
 - relay and policy management
 - live runtime visibility through a full-screen TUI
 
-The shell is V2-native. It may borrow successful interaction patterns from the older V1 `igloo-cli`, but command names, flows, and documentation are organized around the V2 runtime, per-profile daemons, invites, and runtime readiness.
+The shell is V2-native. It may borrow successful interaction patterns from the older V1 `igloo-cli`, but command names, flows, and documentation are organized around the V2 runtime, per-profile daemons, package flows, and runtime-owned status.
 
 ## 2. Product Model
 
@@ -36,7 +36,7 @@ Each active profile runs in its own daemon/runtime instance.
 
 ### 2.2 Vault
 
-The shell owns a managed local vault for secret artifacts. Imported share material, accepted onboarding packages before import, and similar sensitive artifacts are encrypted at rest by default. The vault is shell-managed and is not exposed as a raw plaintext file store.
+The shell owns a managed local vault for secret artifacts. Imported share material, imported `bfonboard` packages before profile creation, and similar sensitive artifacts are encrypted at rest by default. The vault is shell-managed and is not exposed as a raw plaintext file store.
 
 ### 2.3 Daemon
 
@@ -118,7 +118,8 @@ Each `profiles/<profile-id>.json` file stores:
 - `share_ref`
 - `relay_profile`
 - `runtime_options`
-- `policy_overrides`
+- `manual_peer_policy_overrides`
+- `remote_peer_policy_observations`
 - `state_path`
 - `daemon_socket_path`
 - `last_used_at`
@@ -126,12 +127,13 @@ Each `profiles/<profile-id>.json` file stores:
 
 Behavioral rules:
 
-- `id` is stable and shell-generated.
+- `id` is the canonical derived `profile_id`.
 - `label` is user-facing and mutable.
 - `group_ref` points to a managed group package under `data/groups`.
 - `share_ref` points to an encrypted vault record, not a plaintext share path.
 - `runtime_options` mirrors supported host/runtime options already exposed through config and control APIs.
-- `policy_overrides` mirrors peer policy overrides persisted for the profile.
+- `manual_peer_policy_overrides` persists local operator overrides.
+- `remote_peer_policy_observations` persists the last ping-reported remote policy observations.
 
 ### 4.3 Vault Record
 
@@ -143,7 +145,7 @@ Metadata fields:
 - `kind`
   Allowed values: `share_package`, `onboarding_package`, `import_bundle`
 - `source`
-  Allowed values: `file_import`, `invite_accept`, `shell_keygen`, `profile_export_roundtrip`
+  Allowed values: `file_import`, `bfonboard_import`, `shell_keygen`, `profile_export_roundtrip`
 - `ciphertext_path`
 - `key_source`
   Allowed values: `os_keyring`, `passphrase`
@@ -201,8 +203,9 @@ The shell spec adopts the control operations already supported by the host layer
 See `PROFILE-AND-VAULT-ARCHITECTURE.md` for the daemon bootstrap path and the boundary between shell-managed storage and `bifrost-app` runtime hosting.
 
 - status
-- policies
-- set_policy
+- runtime_status
+- set_manual_peer_policy_override
+- clear_peer_policy_overrides
 - ping
 - onboard
 - sign
@@ -227,7 +230,7 @@ Purpose: guided first-run and import experience.
 
 Required behaviors:
 
-- if no profiles exist, offer create-from-files, import-onboarding-package, or use dev keygen
+- if no profiles exist, offer create-from-files, `onboard`, or use external dev tooling to generate material
 - allow relay profile selection or creation
 - allow profile label selection
 - unlock and validate imported secret material
@@ -241,24 +244,109 @@ Commands:
 
 - `profile list`
 - `profile show <profile-id>`
-- `profile import --group <path> --share <path> [--label <label>] [--relay-profile <id>]`
-- `profile import --onboarding-package <path> [--label <label>] [--relay-profile <id>]`
-- `profile export <profile-id> --out-dir <path>`
+- `profile load [<profile-id>]`
+- `profile backup <profile-id>`
 - `profile remove <profile-id>`
 - `profile doctor <profile-id>`
 
 Rules:
 
-- import converts file-based artifacts into managed shell records
-- export writes explicit files chosen by the user and requires unlock
 - remove never deletes exported user files outside the shell store
 - doctor validates manifest integrity, vault accessibility, runtime state path, socket path, and relay profile references
+
+### 6.2a `profile load`
+
+Commands:
+
+- `profile load`
+- `profile load <profile-id>`
+- `profile load [<profile-id>] [--vault-secret <value> | --vault-secret-file <path>]`
+
+Rules:
+
+- `profile load` is the canonical way to enter the logged-in shell
+- without a profile id, `profile load` presents a CLI profile picker
+- `profile load` prompts for the vault secret when no explicit secret source is provided
+- a successful `profile load` launches the logged-in shell directly
+
+### 6.2b `import`
+
+Commands:
+
+- `import <bfprofile-or-path> [--label <label>]`
+- `import <bfprofile-or-path> --package-secret <value> --vault-secret <value> [--label <label>]`
+- `import <bfprofile-or-path> --package-secret-file <path> --vault-secret-file <path> [--label <label>]`
+
+Rules:
+
+- import converts an encrypted `bfprofile` payload into a managed shell profile
+- `import` prompts for any missing label or secret inputs on a TTY
+- a successful import launches the logged-in shell unless `--json` is supplied
+
+### 6.2c `recover`
+
+Commands:
+
+- `recover <bfshare-or-path> [--label <label>]`
+- `recover <bfshare-or-path> --package-secret <value> --vault-secret <value> [--label <label>]`
+- `recover <bfshare-or-path> --package-secret-file <path> --vault-secret-file <path> [--label <label>]`
+
+Rules:
+
+- recover resolves a `bfshare` payload into a managed profile using the latest published backup
+- `recover` prompts for any missing label or secret inputs on a TTY
+- a successful recovery launches the logged-in shell unless `--json` is supplied
+
+### 6.2d `export`
+
+Commands:
+
+- `export <profile-id> --out <path> [--format raw|bfprofile|bfshare|bfonboard]`
+
+Rules:
+
+- export writes explicit files chosen by the user and remains CLI-only
+- canonical onboarding artifacts are emitted through `export --format bfonboard`
+
+### 6.2e `onboard`
+
+Commands:
+
+- `onboard <package-or-path> [--label <label>]`
+- `onboard <package-or-path> --onboard-secret <value> --vault-secret <value> [--label <label>]`
+- `onboard <package-or-path> --onboard-secret-file <path> --vault-secret-file <path> [--label <label>]`
+- `onboard <package-or-path> ... --json`
+
+Rules:
+
+- onboarding packages are imported through `onboard`, not `profile import`
+- `<package-or-path>` accepts either a file path or an inline `bfonboard...` payload
+- if `--label` is omitted on a TTY, `onboard` prompts for the profile name before any secret prompts
+- if `--label` is omitted on a non-TTY, `onboard` fails and requires `--label`
+- default behavior prompts for onboarding-secret input first, then vault-secret input, both without echo
+- vault-secret interactive entry requires a confirmation prompt
+- exactly one explicit onboarding-secret source may be supplied: `--onboard-secret` or `--onboard-secret-file`
+- exactly one explicit vault-secret source may be supplied: `--vault-secret` or `--vault-secret-file`
+- a successful onboard creates a managed profile and launches the logged-in shell for that profile by default, reusing the entered vault secret for that session
+- `--json` keeps the command in automation/json mode
+
+### 6.2f `keygen`
+
+Commands:
+
+- `keygen`
+- `keygen --keyset-name <name> --threshold <n> --count <n> --member-index <n> --label <label> --relay-url <url>...`
+
+Rules:
+
+- keyset generation is launched from the CLI, not from the TUI
+- the CLI collects the local member selection, vault secret, and onboarding-package distribution secret
+- a successful keygen creates the local managed profile, writes onboarding packages for the remaining shares, and launches the logged-in shell unless `--json` is supplied
 
 ### 6.3 `daemon`
 
 Commands:
 
-- `daemon start --profile <profile-id>`
 - `daemon stop --profile <profile-id>`
 - `daemon restart --profile <profile-id>`
 - `daemon status [--profile <profile-id>]`
@@ -269,13 +357,13 @@ Rules:
 - `status` without `--profile` shows all known profile daemons
 - `logs` reads structured daemon logs from the profile state directory
 - `start` prints socket path, pid if known, profile id, and readiness summary
+- `load` unlocks profiles before the TUI starts and auto-starts a stopped daemon as part of session entry
 
 ### 6.4 `runtime`
 
 Commands:
 
 - `runtime status --profile <profile-id>`
-- `runtime readiness --profile <profile-id>`
 - `runtime ops --profile <profile-id>`
 - `runtime sign --profile <profile-id> <message-hex32>`
 - `runtime ecdh --profile <profile-id> <pubkey-hex32>`
@@ -289,52 +377,60 @@ Rules:
 - `ecdh` prints the shared secret hex by default and supports `--json`
 - `wipe-state` requires explicit confirmation unless `--yes` is supplied
 
-### 6.5 `peer`
+### 6.5 `check`
+
+Commands:
+
+- `check onboard --profile <profile-id>`
+- `check sign --profile <profile-id>`
+- `check ecdh --profile <profile-id>`
+
+Rules:
+
+- `check` is the canonical public readiness surface
+- `check onboard` reports inviter/device readiness and must not be blocked by sign/ecdh peer-count degradation alone
+- `check sign` and `check ecdh` derive their results from signer-owned readiness and readiness explanation data
+- all checks return machine-readable reasons when not ready
+
+### 6.6 `peer`
 
 Commands:
 
 - `peer list --profile <profile-id>`
 - `peer ping --profile <profile-id> <peer-pubkey>`
-- `peer onboard --profile <profile-id> <peer-pubkey> [--challenge-hex32 <hex>]`
+- `peer onboard --profile <profile-id> <peer-pubkey>`
 
 Rules:
 
 - `list` renders peer status from live runtime data, not static config alone
 - peer rows include idx, pubkey, online, last seen, known, incoming nonce availability, outgoing nonce availability, sign readiness, and nonce-send expectation
 
-### 6.6 `invite`
+### 6.6 `bfonboard`
 
 Commands:
 
-- `invite create --profile <profile-id> [--relay <url> ...] [--expires-in-secs <n>] [--label <label>]`
-- `invite list --profile <profile-id>`
-- `invite show --profile <profile-id> <challenge-hex32>`
-- `invite revoke --profile <profile-id> <challenge-hex32>`
-- `invite assemble --token <token> --share <path> (--password-env <var> | --password-file <path> | --password-stdin | --generate-password)`
-- `invite accept <package-or-path> (--password-env <var> | --password-file <path> | --password-stdin)`
-- `invite import <package-or-path> [--label <label>] [--relay-profile <id>]`
+- `export <profile> --format bfonboard --recipient-share <path> --package-password-env <var>`
 
 Rules:
 
-- `create`, `list`, `show`, and `revoke` are daemon-backed profile operations
-- `assemble` and `accept` remain local artifact transforms
-- `import` consumes an accepted onboarding package and creates a managed profile
-- `show` renders one pending invite record with expiry, relay set, callback peer, label, and consumed state
+- canonical onboarding artifacts are emitted only through `export --format bfonboard`
+- the exported package carries the recipient share secret, relay set, and callback peer pubkey
+- no legacy invite assembly or invite-token artifact flow remains
 
 ### 6.7 `policy`
 
 Commands:
 
 - `policy show --profile <profile-id>`
-- `policy set-default --profile <profile-id> --send <allow|block> --receive <allow|block>`
-- `policy set-peer --profile <profile-id> <peer-pubkey> --send <allow|block> --receive <allow|block>`
+- `policy set-default-override --profile <profile-id> --direction <request|respond> --method <ping|onboard|sign|ecdh> --value <unset|allow|deny>`
+- `policy set-peer-override --profile <profile-id> <peer-pubkey> --direction <request|respond> --method <ping|onboard|sign|ecdh> --value <unset|allow|deny>`
 - `policy clear-peer --profile <profile-id> <peer-pubkey>`
 
 Rules:
 
-- policies are persisted into the profile manifest and applied to the live daemon
-- `show` displays defaults plus peer overrides
-- a hidden compatibility command may still accept raw JSON, but raw JSON is not part of the primary documented surface
+- manual peer policy overrides and remote peer policy observations are persisted into the profile manifest and applied to the live daemon
+- `show` displays default overrides plus peer overrides using the per-method request/respond matrix
+- no coarse `send` / `receive` policy commands remain in the primary CLI surface
 
 ### 6.8 `relays`
 
@@ -372,16 +468,9 @@ Rules:
 - if the selected profile daemon is not running, offer start/connect/back
 - the TUI never embeds a second direct runtime path; it always attaches to a daemon
 
-### 6.11 `dev`
+### 6.11 Developer Tooling
 
-Commands:
-
-- `dev keygen`
-- `dev relay`
-- `dev e2e-node`
-- `dev e2e-full`
-
-These preserve current developer tooling and devnet workflows. They are not the primary user-facing onboarding surface.
+Developer relay, keygen, and e2e orchestration live in `bifrost-devtools`, not in `igloo-shell`.
 
 ## 7. Hard-Cut Migration
 
@@ -391,143 +480,110 @@ Rules:
 
 - the namespace-based CLI in this document is the only supported public interface
 - `listen`, `status`, `policies`, `set-policy`, `sign`, `ecdh`, `ping`, and `onboard` are removed as public commands
-- the standalone `igloo-shell-tui` entrypoint is removed from the supported interface in favor of `igloo-shell tui`
+- the standalone `igloo-shell-tui` entrypoint is removed from the supported interface
 - existing developer utilities remain available only under the `dev` namespace
 - docs, examples, scripts, and tests move directly to the new surface
 
 ## 8. TUI Specification
 
-The TUI is a full-screen operator console attached to one profile daemon.
+The TUI is a full-screen session shell with two clear modes:
+
+- logged out
+- logged in
+
+It is no longer modeled as a flat operator console.
 
 ### 8.1 Entry Behavior
 
-- `tui --profile <id>` attaches directly
-- `tui` opens a profile selector when multiple profiles exist
-- if no profiles exist, the TUI opens the setup screen
+- `profile load` is the canonical shell entrypoint
+- `profile load <profile-id>` prompts for the vault secret in the CLI, then opens the logged-in shell directly
+- `profile load` with no profile id opens a CLI profile picker first
+- successful onboarding/import/recover/create flows land directly in the logged-in shell
+- logout stops the active daemon and exits the TUI back to the terminal
 
-### 8.2 Screens
+### 8.2 Logged-In Shell
 
-The TUI has six primary sections:
+The TUI is a logged-in session shell with three tabs:
 
-- `Overview`
-- `Peers`
-- `Invites`
-- `Policies`
-- `Logs`
-- `Setup`
+- Dashboard
+- Permissions
+- Settings
 
-### 8.3 Overview
+CLI commands own flow launch and prompting for:
+
+- load
+- onboard
+- import
+- recover
+- keygen
+
+### 8.3 Onboarding And Provisioning Flows
+
+The CLI owns the full operator flows for:
+
+- `bfonboard` onboarding
+- `bfprofile` import
+- `bfshare` recovery
+- keyset generation
+
+Required behavior:
+
+- each flow uses explicit connect/preview/save steps where appropriate
+- the save step collects the local profile name and vault secret
+- the keyset flow creates the local device and exports onboarding packages for the remaining shares
+
+### 8.4 Logged-In Tabs
+
+The logged-in shell has exactly three top tabs:
+
+- `Dashboard`
+- `Permissions`
+- `Settings`
+
+#### Dashboard
 
 Shows:
 
-- profile label and id
+- active profile summary
 - daemon status
-- runtime device id
-- threshold and group size if available
-- runtime readiness flags
-- degraded reasons
-- pending operation count
-- last refresh time
+- readiness
+- threshold and group size
+- pending operation summary
+- last refresh state
 
-Actions:
-
-- start daemon
-- stop daemon
-- restart daemon
-- refresh runtime status
-- jump to pending operations detail
-
-### 8.4 Peers
-
-Shows one row per peer with:
-
-- idx
-- shortened pubkey
-- known flag
-- online flag
-- last seen
-- incoming nonce availability
-- outgoing nonce availability
-- outgoing spent
-- can sign
-- should send nonces
-
-Actions:
-
-- ping selected peer
-- onboard selected peer
-- view full pubkey
-
-### 8.5 Invites
+#### Permissions
 
 Shows:
 
-- label
-- challenge hex
-- relay set summary
-- created time
-- expiry time
-- consumed state
-- callback peer
+- default policy
+- peer rows
+- current effective mode per peer
 
-Actions:
+Actions available from this tab:
 
-- create invite
-- copy token
-- show full token
-- revoke invite
-- import accepted onboarding package
+- cycle policy
+- clear override
+- ping peer
+- onboard peer
+- refresh
 
-### 8.6 Policies
+#### Settings
 
 Shows:
 
-- default send/receive posture
-- peer-specific overrides
+- daemon controls
+- relay profile summary
+- log detail
+- export profile
+- logout
 
-Actions:
-
-- edit defaults
-- add peer override
-- edit peer override
-- clear peer override
-
-### 8.7 Logs
-
-Shows structured daemon events with:
-
-- timestamp
-- level
-- short message
-- compact summary derived from event payload
-
-Behaviors:
-
-- duplicate adjacent events are collapsed
-- verbosity can be toggled
-- logs are readable without leaving the TUI
-
-### 8.8 Setup
-
-Supports:
-
-- import group/share files
-- import accepted onboarding package
-- export current profile
-- choose relay profile
-- view unlock status
-- start daemon after import
-
-### 8.9 Keybindings
+### 8.5 Keybindings
 
 Required keybindings:
 
-- `Tab` / `Shift-Tab` move between sections
-- arrow keys move within tables and menus
-- `Enter` opens selected action
-- `r` refreshes live state
-- `l` toggles log visibility or log detail
-- `s` starts or stops the daemon for the attached profile
+- arrows move between tabs, lists, and action regions
+- `Enter` selects the focused item or runs the primary action
+- `Esc` goes back, closes the current substate, or returns to Home from logout-capable views
 - `q` quits the TUI client only
 
 ## 9. UX Rules
@@ -571,7 +627,7 @@ Specifically:
 
 - per-profile daemons wrap the existing host `listen` command with control socket support
 - TUI runtime views consume control operations already available for status, peer status, readiness, runtime status, runtime metadata, config read/update, and wipe-state
-- existing local invite assemble and accept utilities remain in place and are promoted into the new shell surface
+- canonical `bfonboard` export/import is part of the shell surface
 
 ### 11.2 Configuration Migration
 
@@ -592,7 +648,7 @@ Daemons write structured logs per profile under the profile state directory. CLI
 ### 12.2 Vault and Profile Management
 
 - import from group/share files creates a valid profile manifest and encrypted vault record
-- import from accepted onboarding package creates a valid profile manifest and encrypted vault record
+- import from encrypted `bfonboard` package creates a valid profile manifest and encrypted vault record
 - export requires unlock and writes usable files
 - wrong passphrase fails without partial plaintext output
 - doctor reports missing group, broken vault record, invalid relay profile, and stale state paths
@@ -607,30 +663,27 @@ Daemons write structured logs per profile under the profile state directory. CLI
 ### 12.4 Runtime Operations
 
 - runtime status renders device status for a running daemon
-- runtime readiness renders degraded reasons when peer counts are insufficient
+- `check onboard` reports relay and inviter readiness for demo/live onboarding
+- `check sign` and `check ecdh` report capability and missing peers
 - peer list shows live peer data
 - peer ping succeeds against a healthy devnet
-- peer onboard succeeds with and without explicit challenge
+- peer onboard succeeds against a healthy devnet
 - runtime sign returns signature output
 - runtime ecdh returns shared secret output
 - runtime wipe-state requires confirmation and completes through the live daemon
 
-### 12.5 Invite Lifecycle
+### 12.5 Onboarding Package Lifecycle
 
-- invite create returns a usable token
-- invite list and show render pending invite details
-- invite revoke removes or marks the invite correctly
-- invite assemble produces an onboarding package
-- invite accept decodes the onboarding package correctly
-- invite import creates a usable managed profile
+- `export --format bfonboard` produces a usable onboarding package
+- onboard decodes the canonical onboarding package correctly
+- onboard creates a usable managed profile
 
 ### 12.6 TUI
 
 - TUI opens profile picker when needed
 - TUI overview renders readiness and pending operation state
 - TUI peers screen can run ping and onboard actions
-- TUI invites screen can create and revoke invites
-- TUI policies screen can edit defaults and peer overrides
+- TUI permissions screen can edit defaults and peer overrides
 - quitting the TUI does not stop the daemon
 
 ## 13. Default Decisions

@@ -22,12 +22,12 @@ cargo run -p igloo-shell-cli -- relays list
 cargo run -p igloo-shell-cli -- profile list
 ```
 
-The full target UX is specified in `V2-SHELL-SPEC.md`. The current implementation includes managed profiles, daemon/runtime commands, invite flows, the daemon-backed TUI, and managed-profile release scripts.
+The full target UX is specified in `V2-SHELL-SPEC.md`. The current implementation includes managed profiles, daemon/runtime commands, package flows, the daemon-backed TUI, and managed-profile release scripts.
 
 ## 3. Generate Local Artifacts
 
 ```bash
-cargo run -p igloo-shell-cli -- dev keygen --out-dir ./data --threshold 2 --count 3 --relay ws://127.0.0.1:8194
+cargo run --manifest-path ../bifrost-rs/Cargo.toml -p bifrost-devtools -- keygen --out-dir ./data --threshold 2 --count 3 --relay ws://127.0.0.1:8194
 ```
 
 Generated files include:
@@ -40,14 +40,14 @@ The generated `igloo-shell-<name>.json` files are developer artifacts for lower-
 ## 4. Start Relay
 
 ```bash
-cargo run -p igloo-shell-cli -- dev relay --host 127.0.0.1 --port 8194
+cargo run --manifest-path ../bifrost-rs/Cargo.toml -p bifrost-devtools -- relay --host 127.0.0.1 --port 8194
 ```
 
 ## 5. Shell-Owned Dev E2E
 
 ```bash
-cargo run -p igloo-shell-cli --offline -- dev e2e-node --out-dir ./data --relay ws://127.0.0.1:8194
-cargo run -p igloo-shell-cli --offline -- dev e2e-full --threshold 11 --count 15
+cargo run --manifest-path ../bifrost-rs/Cargo.toml -p bifrost-devtools --offline -- e2e-node --out-dir ./data --relay ws://127.0.0.1:8194 --shell-bin ./target/debug/igloo-shell
+cargo run --manifest-path ../bifrost-rs/Cargo.toml -p bifrost-devtools --offline -- e2e-full --threshold 11 --count 15 --shell-bin ./target/debug/igloo-shell
 ```
 
 Wrapper scripts are also available:
@@ -62,14 +62,32 @@ scripts/test-node-e2e.sh
 scripts/test-tui-e2e.sh
 ```
 
-## 6. Launch The Daemon-Backed TUI
+## 6. Load A Profile
 
 ```bash
-cargo run -p igloo-shell-cli -- daemon start --profile <profile-id>
-cargo run -p igloo-shell-cli -- tui --profile <profile-id>
+cargo run -p igloo-shell-cli -- profile load
 ```
 
-The TUI attaches to the per-profile daemon. It does not boot a separate runtime from raw config files.
+`profile load` is now the normal way into the logged-in shell:
+
+- if you omit the profile id, the CLI shows a simple numbered profile picker
+- after you pick a profile, the CLI prompts for the vault secret
+- once the profile unlocks, `igloo-shell` launches the logged-in shell directly
+
+You can also enter through the flow-specific top-level commands:
+
+- `igloo-shell onboard <package-or-path>`
+- `igloo-shell import <bfprofile-or-path>`
+- `igloo-shell recover <bfshare-or-path>`
+- `igloo-shell keygen`
+
+Those commands collect their inputs in the CLI, then launch the logged-in shell on success. Once loaded, the TUI has only three top tabs:
+
+- `Dashboard`
+- `Permissions`
+- `Settings`
+
+Navigation is arrow-key first with `Enter` to select, `Esc` to go back, and `q` to quit. Logging out stops the active daemon and exits back to the terminal.
 
 ## Next Reading
 
@@ -77,4 +95,4 @@ The TUI attaches to the per-profile daemon. It does not boot a separate runtime 
 - `OPERATIONS.md`
 - `CONFIGURATION.md`
 - `TESTING.md`
-- `../../../docs/FROSTR-ARCHITECTURE.md`
+- `../../../docs/ARCHITECTURE.md`
