@@ -1,6 +1,6 @@
 # igloo-shell V2 Shell Specification
 
-This document is the build-ready product and implementation specification for the next-generation `igloo-shell` CLI and TUI. It defines the canonical user model, shell-managed local state, CLI namespaces, TUI behavior, hard-cut migration rules, and acceptance criteria for the FROSTR V2 shell experience.
+This document is the build-ready product and implementation specification for the next-generation `igloo-shell` CLI. It defines the canonical user model, shell-managed local state, CLI namespaces, daemon behavior, hard-cut migration rules, and acceptance criteria for the FROSTR V2 shell experience.
 
 ## 1. Goals
 
@@ -11,7 +11,7 @@ This document is the build-ready product and implementation specification for th
 - peer diagnostics and protocol operations
 - package-based onboarding
 - relay and policy management
-- live runtime visibility through a full-screen TUI
+- live runtime visibility through daemon-backed CLI commands and logs
 
 The shell is V2-native. It may borrow successful interaction patterns from the older V1 `igloo-cli`, but command names, flows, and documentation are organized around the V2 runtime, per-profile daemons, package flows, and runtime-owned status.
 
@@ -40,7 +40,7 @@ The shell owns a managed local vault for secret artifacts. Imported share materi
 
 ### 2.3 Daemon
 
-The daemon is the long-lived runtime process for a single profile. It is the canonical source of live state. CLI commands and the TUI connect to the daemon through a per-profile control socket when live runtime state is needed.
+The daemon is the long-lived runtime process for a single profile. It is the canonical source of live state. CLI commands connect to the daemon through a per-profile control socket when live runtime state is needed.
 
 ### 2.4 Relay Profile
 
@@ -172,7 +172,7 @@ The daemon owns:
 - control socket request handling
 - structured runtime logging
 
-CLI and TUI clients use the daemon when they need:
+CLI commands use the daemon when they need:
 
 - runtime status
 - readiness
@@ -194,7 +194,7 @@ Rules:
 - socket path is deterministic from profile id
 - starting an already running daemon is idempotent and returns the current status
 - stopping a daemon persists state before exit when possible
-- quitting the TUI never stops the daemon implicitly
+- CLI process exit never stops the daemon implicitly
 
 ### 5.3 Control Plane
 
@@ -218,7 +218,7 @@ See `PROFILE-AND-VAULT-ARCHITECTURE.md` for the daemon bootstrap path and the bo
 - runtime_metadata
 - wipe_state
 
-The CLI and TUI must render these as stable shell commands and screens rather than exposing raw control JSON to users.
+The CLI must render these as stable shell commands rather than exposing raw control JSON to users.
 
 ## 6. CLI Surface
 
@@ -236,7 +236,6 @@ Required behaviors:
 - unlock and validate imported secret material
 - create managed profile records
 - optionally start the daemon
-- optionally launch the TUI on success
 
 ### 6.2 `profile`
 
@@ -355,7 +354,7 @@ Commands:
 
 Rules:
 
-- keyset generation is launched from the CLI, not from the TUI
+- keyset generation is launched from the CLI
 - the CLI collects the local member selection, vault secret, and onboarding-package distribution secret
 - a successful keygen creates the local managed profile, writes onboarding packages for the remaining shares, and prints the next commands unless `--json` is supplied
 
@@ -373,7 +372,7 @@ Rules:
 - `status` without `--profile` shows all known profile daemons
 - `logs` reads structured daemon logs from the profile state directory
 - `start` prints socket path, pid if known, profile id, and readiness summary
-- `load` unlocks profiles before the TUI starts and auto-starts a stopped daemon as part of session entry
+- `load` unlocks profiles before daemon start and may auto-start a stopped daemon when `--start` or `--daemon` is supplied
 
 ### 6.4 `runtime`
 
@@ -472,19 +471,7 @@ Commands:
 
 This exists for operator convenience and remains a local stateless utility.
 
-### 6.10 `tui`
-
-Command:
-
-- `tui [--profile <profile-id>]`
-
-Rules:
-
-- if no profile is given and multiple profiles exist, open a picker
-- if the selected profile daemon is not running, offer start/connect/back
-- the TUI never embeds a second direct runtime path; it always attaches to a daemon
-
-### 6.11 Developer Tooling
+### 6.10 Developer Tooling
 
 Developer relay, keygen, and e2e orchestration live in `bifrost-devtools`, not in `igloo-shell`.
 
@@ -496,115 +483,26 @@ Rules:
 
 - the namespace-based CLI in this document is the only supported public interface
 - `listen`, `status`, `policies`, `set-policy`, `sign`, `ecdh`, `ping`, and `onboard` are removed as public commands
-- the standalone `igloo-shell-tui` entrypoint is removed from the supported interface
 - existing developer utilities remain available only under the `dev` namespace
 - docs, examples, scripts, and tests move directly to the new surface
 
-## 8. TUI Specification
+## 8. CLI-Only Operator Contract
 
-The TUI is a full-screen session shell with two clear modes:
-
-- logged out
-- logged in
-
-It is no longer modeled as a flat operator console.
-
-### 8.1 Entry Behavior
-
-- `profile load` is the canonical shell entrypoint
-- `profile load <profile-id>` prompts for the vault secret in the CLI, then opens the logged-in shell directly
-- `profile load` with no profile id opens a CLI profile picker first
-- successful onboarding/import/recover/create flows land directly in the logged-in shell
-- logout stops the active daemon and exits the TUI back to the terminal
-
-### 8.2 Logged-In Shell
-
-The TUI is a logged-in session shell with three tabs:
-
-- Dashboard
-- Permissions
-- Settings
-
-CLI commands own flow launch and prompting for:
-
-- load
-- onboard
-- import
-- recover
-- keygen
-
-### 8.3 Onboarding And Provisioning Flows
-
-The CLI owns the full operator flows for:
-
-- `bfonboard` onboarding
-- `bfprofile` import
-- `bfshare` recovery
-- keyset generation
+`igloo-shell` is now CLI-only.
 
 Required behavior:
 
-- each flow uses explicit connect/preview/save steps where appropriate
-- the save step collects the local profile name and vault secret
-- the keyset flow creates the local device and exports onboarding packages for the remaining shares
-
-### 8.4 Logged-In Tabs
-
-The logged-in shell has exactly three top tabs:
-
-- `Dashboard`
-- `Permissions`
-- `Settings`
-
-#### Dashboard
-
-Shows:
-
-- active profile summary
-- daemon status
-- readiness
-- threshold and group size
-- pending operation summary
-- last refresh state
-
-#### Permissions
-
-Shows:
-
-- default policy
-- peer rows
-- current effective mode per peer
-
-Actions available from this tab:
-
-- cycle policy
-- clear override
-- ping peer
-- onboard peer
-- refresh
-
-#### Settings
-
-Shows:
-
-- daemon controls
-- relay profile summary
-- log detail
-- export profile
-- logout
-
-### 8.5 Keybindings
-
-Required keybindings:
-
-- arrows move between tabs, lists, and action regions
-- `Enter` selects the focused item or runs the primary action
-- `Esc` goes back, closes the current substate, or returns to Home from logout-capable views
-- `q` quits the TUI client only
+- `profile load` is the canonical shell entrypoint for unlocking a local profile
+- `profile load --start` starts the daemon and attaches to daemon log output
+- `profile load --daemon` starts the daemon in the background and exits
+- successful onboarding/import/recover/keygen flows print the resulting profile and next commands by default
+- `import`, `recover`, and `onboard` may use `--start` or `--daemon` to begin daemon execution immediately
+- daemon logs are viewed through CLI output or `daemon logs`
+- daemon status, runtime status, peer visibility, and policy inspection are all exposed through first-class CLI commands rather than a session dashboard
 
 ## 9. UX Rules
 
-The CLI and TUI must follow these rules consistently.
+The CLI must follow these rules consistently.
 
 - prefer human-readable summaries by default and `--json` for machine-friendly output
 - never require users to know raw socket paths
@@ -642,7 +540,7 @@ Implementation must reuse existing host/runtime capabilities already present in 
 Specifically:
 
 - per-profile daemons wrap the existing host `listen` command with control socket support
-- TUI runtime views consume control operations already available for status, peer status, readiness, runtime status, runtime metadata, config read/update, and wipe-state
+- runtime-facing CLI commands consume control operations already available for status, peer status, readiness, runtime status, runtime metadata, config read/update, and wipe-state
 - canonical `bfonboard` export/import is part of the shell surface
 
 ### 11.2 Configuration Migration
@@ -651,7 +549,7 @@ Path-based dev configs generated by current `keygen` remain supported for develo
 
 ### 11.3 Logging
 
-Daemons write structured logs per profile under the profile state directory. CLI `daemon logs` and the TUI log screen read from the same source.
+Daemons write structured logs per profile under the profile state directory. CLI `daemon logs` reads from that source.
 
 ## 12. Test and Acceptance Criteria
 
@@ -694,13 +592,12 @@ Daemons write structured logs per profile under the profile state directory. CLI
 - onboard decodes the canonical onboarding package correctly
 - onboard creates a usable managed profile
 
-### 12.6 TUI
+### 12.6 CLI Start Modes
 
-- TUI opens profile picker when needed
-- TUI overview renders readiness and pending operation state
-- TUI peers screen can run ping and onboard actions
-- TUI permissions screen can edit defaults and peer overrides
-- quitting the TUI does not stop the daemon
+- `profile load --start` attaches to daemon logs
+- `profile load --daemon` starts the daemon in the background
+- `import --start`, `recover --start`, and `onboard --start` attach to daemon logs after profile creation
+- `import --daemon`, `recover --daemon`, and `onboard --daemon` start the daemon in the background after profile creation
 
 ## 13. Default Decisions
 
@@ -710,7 +607,6 @@ The following decisions are fixed by this spec and should not be reopened during
 - topology is one daemon per active profile
 - local secret material is shell-managed and encrypted at rest
 - command surface is V2-native and namespace-based
-- TUI is an operator console, not a wizard-only app
 - the shell balances operator workflows and provisioning flows
 - existing devnet tooling remains available under `dev`
 - Unix domain sockets are the initial daemon transport
@@ -722,5 +618,4 @@ Implementation is complete when:
 - the new CLI namespaces exist and are documented
 - profile and vault storage exist with encrypted secret handling
 - per-profile daemons can be started and queried
-- the TUI attaches to daemons and exposes the specified screens
 - automated tests cover the acceptance criteria above

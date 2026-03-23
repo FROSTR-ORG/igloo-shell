@@ -1732,6 +1732,16 @@ fn print_profile_next_commands(profile_id: &str) {
     println!("  igloo-shell profile load {profile_id}");
     println!("  igloo-shell profile load {profile_id} --start");
     println!("  igloo-shell profile load {profile_id} --daemon");
+    println!("  igloo-shell daemon status --profile {profile_id}");
+}
+
+fn print_running_profile_commands(profile_id: &str) {
+    println!("Useful status commands:");
+    println!("  igloo-shell daemon status --profile {profile_id}");
+    println!("  igloo-shell runtime status --profile {profile_id}");
+    println!("  igloo-shell peer list --profile {profile_id}");
+    println!("  igloo-shell policy show --profile {profile_id}");
+    println!("  igloo-shell daemon logs --profile {profile_id} --follow");
 }
 
 fn print_daemon_started_summary(
@@ -1752,6 +1762,7 @@ fn print_daemon_started_summary(
     println!("  pid: {}", metadata.pid);
     println!("  socket: {}", metadata.socket_path);
     println!("  log: {}", metadata.log_path);
+    print_running_profile_commands(&profile.id);
 }
 
 fn print_profile_load_summary(

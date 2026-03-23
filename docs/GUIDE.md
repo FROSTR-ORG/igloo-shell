@@ -22,7 +22,7 @@ cargo run -p igloo-shell-cli -- relays list
 cargo run -p igloo-shell-cli -- profile list
 ```
 
-The full target UX is specified in `V2-SHELL-SPEC.md`. The current implementation includes managed profiles, daemon/runtime commands, package flows, the daemon-backed TUI, and managed-profile release scripts.
+The full target UX is specified in `V2-SHELL-SPEC.md`. The current implementation includes managed profiles, daemon/runtime commands, package flows, and managed-profile release scripts.
 
 ## 3. Generate Local Artifacts
 
@@ -59,7 +59,6 @@ scripts/devnet.sh status
 scripts/devnet.sh smoke
 scripts/devnet-tmux.sh start
 scripts/test-node-e2e.sh
-scripts/test-tui-e2e.sh
 ```
 
 ## 6. Load A Profile
@@ -68,7 +67,7 @@ scripts/test-tui-e2e.sh
 cargo run -p igloo-shell-cli -- profile load
 ```
 
-`profile load` is now the normal way into the logged-in shell:
+`profile load` is now the normal way to unlock a local profile from the CLI:
 
 - if you omit the profile id, the CLI shows a simple numbered profile picker
 - after you pick a profile, the CLI prompts for the vault secret
@@ -84,6 +83,15 @@ You can also enter through the flow-specific top-level commands:
 - `igloo-shell keygen`
 
 Those commands collect their inputs in the CLI, then print the created profile and next commands on success. `onboard`, `import`, and `recover` support `--daemon` for background start and `--start` for immediate foreground attach.
+
+Once a profile is running, the core operator surface is:
+
+```bash
+cargo run -p igloo-shell-cli -- daemon status --profile <profile-id>
+cargo run -p igloo-shell-cli -- runtime status --profile <profile-id>
+cargo run -p igloo-shell-cli -- peer list --profile <profile-id>
+cargo run -p igloo-shell-cli -- policy show --profile <profile-id>
+```
 
 ## Next Reading
 

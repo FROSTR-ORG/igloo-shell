@@ -14,9 +14,9 @@ PR-gated Rust coverage now includes:
 
 - public CLI `onboard` integration coverage for interactive-resolution logic, `--onboard-secret`, `--onboard-secret-file`, `--vault-secret`, `--vault-secret-file`, and inline package flows
 - public CLI coverage for `profile load` routing, daemon-start flags, and post-import/recover/onboard/keygen next-command output
+- public CLI foreground-start coverage for `import --start`, `recover --start`, and `onboard --start`
 - managed runtime integration coverage for ping, peer onboarding, signing, ECDH, and invite lifecycle
 - live policy command coverage for manifest persistence and daemon-backed runtime updates
-- deterministic TUI coverage for the logged-in session shell, session logout semantics, policy row resolution, and relay parsing/secret-confirmation behavior
 
 Run those targets directly with:
 
@@ -30,7 +30,6 @@ cargo test -p igloo-shell-cli --test policy_integration --offline
 ```bash
 scripts/devnet.sh smoke
 scripts/test-node-e2e.sh
-scripts/test-tui-e2e.sh
 ../../run.sh demo smoke
 scripts/ws_soak.sh --iterations 25 --out dev/audit/work/evidence/ws-soak-$(date +%F).txt
 ```
@@ -54,15 +53,6 @@ scripts/ws_soak.sh --iterations 25 --out dev/audit/work/evidence/ws-soak-$(date 
 
 - `bifrost-rs` bridge and signer fault-injection regressions from the `bifrost-rs` workspace
 - the migrated `bifrost-devtools e2e-full` managed-profile stress harness
-
-`scripts/test-tui-e2e.sh` now exercises the managed-profile daemon-backed path:
-
-- starts a local relay
-- imports three managed profiles into an ephemeral shell home
-- starts per-profile daemons for `bob` and `carol`
-- launches `igloo-shell profile load <alice-profile-id>` in `tmux`
-- verifies the CLI vault prompt hands off cleanly into the logged-in shell, auto-starts `alice`'s daemon, then walks through Dashboard, Permissions, Settings, and Logout
-- asserts on rendered policy rows, session logout, daemon shutdown on logout, and TUI process exit
 
 `../../run.sh demo smoke` validates the host-side demo path:
 

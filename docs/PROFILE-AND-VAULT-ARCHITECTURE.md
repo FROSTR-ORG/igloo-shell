@@ -33,7 +33,7 @@ It binds together:
 - optional runtime option overrides
 - optional peer policy overrides
 
-The CLI and TUI address profiles by id or label. They do not require users to pass raw config file paths for normal shell workflows.
+The CLI addresses profiles by id or label. It does not require users to pass raw config file paths for normal shell workflows.
 
 ### Vault Record
 

@@ -150,6 +150,22 @@ impl TestHarness {
         self.run(args).json()
     }
 
+    pub fn run_for_a_bit_with_env(
+        &self,
+        args: &[&str],
+        extra_env: &[(&str, &str)],
+        duration: Duration,
+    ) -> CommandResult {
+        let mut command = self.command_with_env(args, extra_env);
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        let mut child = command.spawn().expect("spawn igloo-shell");
+        thread::sleep(duration);
+        let _ = child.kill();
+        let output = child.wait_with_output().expect("wait for igloo-shell");
+        decode_output(output)
+    }
+
     pub fn run_json_with_env(&self, args: &[&str], extra_env: &[(&str, &str)]) -> Value {
         self.run_with_env(args, extra_env).json()
     }
@@ -422,6 +438,29 @@ impl TestHarness {
 
     pub fn list_profiles(&self) -> Value {
         self.run_json(&["profile", "list"])
+    }
+
+    pub fn wait_for_profile_id_by_label(&self, label: &str, timeout: Duration) -> String {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            let profiles = self.list_profiles();
+            if let Some(profile_id) = profiles
+                .as_array()
+                .and_then(|items| {
+                    items.iter().find(|item| {
+                        item.get("label")
+                            .and_then(Value::as_str)
+                            .is_some_and(|candidate| candidate == label)
+                    })
+                })
+                .and_then(|item| item.get("id"))
+                .and_then(Value::as_str)
+            {
+                return profile_id.to_string();
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
+        panic!("timed out waiting for profile label {label}");
     }
 
     fn command(&self, args: &[&str]) -> Command {

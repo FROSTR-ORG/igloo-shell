@@ -21,7 +21,16 @@ cargo run -p igloo-shell-cli -- relays set demo --label Demo ws://127.0.0.1:8194
 cargo run -p igloo-shell-cli -- relays default demo
 ```
 
-The shell store and CLI-first flow model are live. `profile load`, `onboard`, `import`, `recover`, and `keygen` are the supported profile entry paths. `profile load --start` is the explicit foreground daemon/session path, and `--daemon` is the background-start convenience flag for profile-producing flows. `V2-SHELL-SPEC.md` is the source of truth for the broader command surface.
+The shell store and CLI-first flow model are live. `profile load`, `onboard`, `import`, `recover`, and `keygen` are the supported profile entry paths. `profile load --start` is the explicit foreground daemon/log path, and `--daemon` is the background-start convenience flag for profile-producing flows. `V2-SHELL-SPEC.md` is the source of truth for the broader command surface.
+
+The CLI replaces the old dashboard-style shell flow with explicit operator commands:
+
+```bash
+cargo run -p igloo-shell-cli -- daemon status --profile alice
+cargo run -p igloo-shell-cli -- runtime status --profile alice
+cargo run -p igloo-shell-cli -- peer list --profile alice
+cargo run -p igloo-shell-cli -- policy show --profile alice
+```
 
 ## Developer Utilities
 
@@ -46,7 +55,6 @@ Convenience wrappers:
 ```bash
 scripts/devnet.sh smoke
 scripts/test-node-e2e.sh
-scripts/test-tui-e2e.sh
 scripts/ws_soak.sh --iterations 25 --out dev/audit/work/evidence/ws-soak-$(date +%F).txt
 ```
 

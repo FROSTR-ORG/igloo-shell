@@ -1350,39 +1350,6 @@ pub async fn connect_onboarding_package_preview(
     })
 }
 
-pub(crate) fn finalize_connected_onboarding_import(
-    paths: &ShellPaths,
-    connection: ConnectedOnboardingImport,
-    label: Option<String>,
-    relay_profile: Option<String>,
-    vault_passphrase: Option<String>,
-) -> Result<ProfileImportResult> {
-    paths.ensure()?;
-    let relay_profile_id = ensure_onboarding_relay_profile(
-        paths,
-        relay_profile,
-        label.as_deref(),
-        &connection.completion.relays,
-    )?;
-    let share_raw =
-        serde_json::to_string_pretty(&SharePackageWire::from(connection.completion.share.clone()))
-            .context("serialize onboarded share package")?;
-    let vault_record = store_secret_payload(
-        paths,
-        "share_package",
-        "bfonboard_import",
-        &share_raw,
-        vault_passphrase,
-    )?;
-    finalize_onboarding_import(
-        paths,
-        connection.completion,
-        label,
-        relay_profile_id,
-        vault_record,
-    )
-}
-
 async fn import_profile_from_onboarding_value_with<F, Fut>(
     paths: &ShellPaths,
     package_raw: &str,

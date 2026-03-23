@@ -85,6 +85,11 @@ fn profile_load_without_runtime_start_prints_next_commands() {
             .stdout
             .contains(&format!("igloo-shell profile load {alice_id} --daemon"))
     );
+    assert!(
+        result
+            .stdout
+            .contains(&format!("igloo-shell daemon status --profile {alice_id}"))
+    );
 
     let status = harness.run_expect_failure(
         &["daemon", "status", "--profile", &alice_id],
@@ -113,11 +118,26 @@ fn profile_load_with_daemon_starts_background_runtime() {
     ]);
 
     assert!(result.stdout.contains("Daemon"));
+    assert!(
+        result
+            .stdout
+            .contains(&format!("igloo-shell runtime status --profile {alice_id}"))
+    );
+    assert!(
+        result
+            .stdout
+            .contains(&format!("igloo-shell peer list --profile {alice_id}"))
+    );
+    assert!(
+        result
+            .stdout
+            .contains(&format!("igloo-shell policy show --profile {alice_id}"))
+    );
     harness.wait_for_runtime(&alice_id, Duration::from_secs(20));
 }
 
 #[test]
-fn import_non_json_prints_next_commands_instead_of_launching_tui() {
+fn import_non_json_prints_next_commands_and_exits() {
     let mut harness = TestHarness::new("import-non-json");
     harness.start_relay();
     harness.keygen(2, 3);
@@ -144,7 +164,50 @@ fn import_non_json_prints_next_commands_instead_of_launching_tui() {
 }
 
 #[test]
-fn recover_non_json_prints_next_commands_instead_of_launching_tui() {
+fn import_with_start_attaches_to_daemon_log() {
+    let mut harness = TestHarness::new("import-start");
+    harness.start_relay();
+    harness.keygen(2, 3);
+    harness.set_relay_profile("local");
+
+    let _result = harness.run_for_a_bit_with_env(
+        &[
+            "import",
+            "--group",
+            support::path_arg(&harness.material_dir().join("group.json")),
+            "--share",
+            support::path_arg(&harness.material_dir().join("share-alice.json")),
+            "--label",
+            "alice-start",
+            "--relay-profile",
+            "local",
+            "--vault-secret",
+            "vault-passphrase",
+            "--start",
+        ],
+        &[],
+        Duration::from_secs(10),
+    );
+
+    let profiles = harness.list_profiles();
+    let profile_id = profiles
+        .as_array()
+        .and_then(|items| {
+            items.iter().find(|item| {
+                item.get("label")
+                    .and_then(Value::as_str)
+                    .is_some_and(|label| label == "alice-start")
+            })
+        })
+        .and_then(|item| item.get("id"))
+        .and_then(Value::as_str)
+        .expect("imported profile id")
+        .to_string();
+    harness.wait_for_runtime(&profile_id, Duration::from_secs(20));
+}
+
+#[test]
+fn recover_non_json_prints_next_commands_and_exits() {
     let mut harness = TestHarness::new("recover-non-json");
     harness.start_relay();
     harness.keygen(2, 3);
@@ -179,6 +242,61 @@ fn recover_non_json_prints_next_commands_instead_of_launching_tui() {
     assert!(result.stdout.contains("Recovery complete."));
     assert!(result.stdout.contains("Next commands:"));
     assert!(result.stdout.contains("igloo-shell profile load"));
+}
+
+#[test]
+fn recover_with_start_attaches_to_daemon_log() {
+    let mut harness = TestHarness::new("recover-start");
+    harness.start_relay();
+    harness.keygen(2, 3);
+    harness.set_relay_profile("local");
+
+    let alice = harness.import_profile("share-alice.json", "alice", "local");
+    let alice_id = extract_profile_id(&alice);
+    harness.run_with_env(
+        &[
+            "profile",
+            "backup",
+            &alice_id,
+            "--vault-passphrase-env",
+            "IGLOO_SHELL_VAULT_PASSPHRASE",
+        ],
+        &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+    );
+    let share = harness.export_bfshare_package(&alice_id, "recover-pass");
+    let share_path = harness.save_onboarding_package("alice-start.bfshare", &share);
+
+    let _result = harness.run_for_a_bit_with_env(
+        &[
+            "recover",
+            support::path_arg(&share_path),
+            "--label",
+            "alice-recover-start",
+            "--package-secret",
+            "recover-pass",
+            "--vault-secret",
+            "vault-passphrase",
+            "--start",
+        ],
+        &[],
+        Duration::from_secs(6),
+    );
+
+    let profiles = harness.list_profiles();
+    let profile_id = profiles
+        .as_array()
+        .and_then(|items| {
+            items.iter().find(|item| {
+                item.get("label")
+                    .and_then(Value::as_str)
+                    .is_some_and(|label| label == "alice-recover-start")
+            })
+        })
+        .and_then(|item| item.get("id"))
+        .and_then(Value::as_str)
+        .expect("recovered profile id")
+        .to_string();
+    harness.wait_for_runtime(&profile_id, Duration::from_secs(20));
 }
 
 #[test]
@@ -226,6 +344,42 @@ fn onboard_non_json_with_daemon_starts_background_runtime() {
         .expect("bob profile id")
         .to_string();
     harness.wait_for_runtime(&bob_id, Duration::from_secs(20));
+}
+
+#[test]
+fn onboard_with_start_attaches_to_daemon_log() {
+    let mut harness = TestHarness::new("onboard-start");
+    harness.start_relay();
+    harness.keygen(2, 4);
+    harness.set_relay_profile("local");
+
+    let alice = harness.import_profile("share-alice.json", "alice", "local");
+    let alice_id = extract_profile_id(&alice);
+    harness.start_daemon(&alice_id);
+    harness.wait_for_runtime(&alice_id, Duration::from_secs(20));
+
+    let package = harness.export_bfonboard_package(&alice_id, "share-bob.json", "invite-pass");
+    let package_path = harness.save_onboarding_package("bob-start.onboarding", &package);
+
+    let _result = harness.run_for_a_bit_with_env(
+        &[
+            "onboard",
+            support::path_arg(&package_path),
+            "--label",
+            "bob-start",
+            "--onboard-secret",
+            "invite-pass",
+            "--vault-secret",
+            "vault-passphrase",
+            "--start",
+        ],
+        &[],
+        Duration::from_secs(10),
+    );
+
+    let profile_id =
+        harness.wait_for_profile_id_by_label("bob-start", Duration::from_secs(20));
+    harness.wait_for_runtime(&profile_id, Duration::from_secs(20));
 }
 
 #[test]

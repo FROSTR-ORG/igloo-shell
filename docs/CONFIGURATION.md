@@ -1,6 +1,6 @@
 # Configuration Reference
 
-`igloo-shell` is now profile-oriented for normal operator workflows. The daemon-backed CLI and TUI attach to managed profiles in the shell store rather than loading raw JSON config files directly.
+`igloo-shell` is now profile-oriented for normal operator workflows. The daemon-backed CLI attaches to managed profiles in the shell store rather than loading raw JSON config files directly.
 
 Path-based JSON runtime config remains relevant only for developer utilities and lower-level `bifrost-rs` hosting.
 
