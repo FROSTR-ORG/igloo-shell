@@ -11,19 +11,20 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use crossterm::event::{Event, KeyCode, KeyEventKind, read};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use igloo_shell_core::shell::{
-    RelayProfile, SetupRequest, ShellCheckKind, ShellPaths, add_relays, check_profile_runtime,
+    DaemonMetadata, PolicyDirection, PolicyMethod, RelayProfile, SetupRequest, ShellCheckKind,
+    ShellPaths, add_relays, apply_rotation_update_from_bfshare_value, check_profile_runtime,
     clear_profile_peer_policy, create_generated_keyset_draft, daemon_log_path,
     daemon_runtime_query, doctor_profile, export_generated_onboarding_package, export_profile,
-    export_profile_as_bfprofile, export_profile_as_bfonboard, export_profile_as_bfshare,
+    export_profile_as_bfonboard, export_profile_as_bfprofile, export_profile_as_bfshare,
     import_generated_share, import_profile_from_bfprofile_value, import_profile_from_files,
     import_profile_from_onboarding_value, list_profiles, load_relay_profiles, load_shell_config,
     publish_profile_backup, read_daemon_metadata, read_profile, recover_profile_from_bfshare_value,
-    remove_profile, remove_relays, replace_relay_profile, resolve_profile_runtime, run_setup,
-    set_default_relay_profile, set_profile_default_policy_override, set_profile_peer_policy_override,
-    start_profile_daemon, stop_profile_daemon, test_relay_connectivity, PolicyDirection,
-    PolicyMethod,
+    remove_daemon_metadata, remove_profile, remove_relays, replace_relay_profile,
+    resolve_profile_runtime, run_setup, set_default_relay_profile,
+    set_profile_default_policy_override, set_profile_peer_policy_override, start_profile_daemon,
+    start_profile_daemon_with_passphrase, stop_profile_daemon, test_relay_connectivity,
+    validate_profile_unlock_with_passphrase,
 };
-use igloo_shell_core::tui;
 use nostr::{FromBech32, Keys, PublicKey, SecretKey, ToBech32};
 use serde::Serialize;
 
@@ -216,6 +217,10 @@ struct OnboardArgs {
     vault_secret_file: Option<String>,
     #[arg(long)]
     label: Option<String>,
+    #[arg(long, conflicts_with = "daemon", conflicts_with = "json")]
+    start: bool,
+    #[arg(long, conflicts_with = "start")]
+    daemon: bool,
     #[arg(long)]
     json: bool,
 }
@@ -227,6 +232,10 @@ struct LoadArgs {
     vault_secret: Option<String>,
     #[arg(long, conflicts_with = "vault_secret")]
     vault_secret_file: Option<String>,
+    #[arg(long, conflicts_with = "daemon")]
+    start: bool,
+    #[arg(long, conflicts_with = "start")]
+    daemon: bool,
 }
 
 #[derive(Debug, Args)]
@@ -250,6 +259,10 @@ struct ImportArgs {
     vault_secret: Option<String>,
     #[arg(long, conflicts_with = "vault_secret")]
     vault_secret_file: Option<String>,
+    #[arg(long, conflicts_with = "daemon", conflicts_with = "json")]
+    start: bool,
+    #[arg(long, conflicts_with = "start")]
+    daemon: bool,
     #[arg(long)]
     json: bool,
 }
@@ -276,6 +289,8 @@ struct RecoverArgs {
     bfshare_or_path: String,
     #[arg(long)]
     label: Option<String>,
+    #[arg(long)]
+    replace_profile: Option<String>,
     #[arg(long, conflicts_with = "package_secret_file")]
     package_secret: Option<String>,
     #[arg(long, conflicts_with = "package_secret")]
@@ -284,6 +299,10 @@ struct RecoverArgs {
     vault_secret: Option<String>,
     #[arg(long, conflicts_with = "vault_secret")]
     vault_secret_file: Option<String>,
+    #[arg(long, conflicts_with = "daemon", conflicts_with = "json")]
+    start: bool,
+    #[arg(long, conflicts_with = "start")]
+    daemon: bool,
     #[arg(long)]
     json: bool,
 }
@@ -479,9 +498,12 @@ async fn handle_profile(paths: &ShellPaths, command: ProfileCommands) -> Result<
             profile_id,
             vault_passphrase_env,
         } => {
-            let result =
-                publish_profile_backup(paths, &profile_id, load_secret_from_env(vault_passphrase_env)?)
-                    .await?;
+            let result = publish_profile_backup(
+                paths,
+                &profile_id,
+                load_secret_from_env(vault_passphrase_env)?,
+            )
+            .await?;
             print_json(&result)
         }
         ProfileCommands::Remove { profile_id, yes } => {
@@ -503,6 +525,7 @@ async fn handle_profile(paths: &ShellPaths, command: ProfileCommands) -> Result<
 }
 
 async fn handle_load(paths: &ShellPaths, args: LoadArgs) -> Result<()> {
+    let mode = load_mode(&args);
     let profile_id = match args.profile_id {
         Some(profile_id) => {
             let _ = read_profile(paths, &profile_id)?;
@@ -518,7 +541,21 @@ async fn handle_load(paths: &ShellPaths, args: LoadArgs) -> Result<()> {
         "profile load requires vault secret input; use --vault-secret / --vault-secret-file, or run on a TTY",
         prompt_load_vault_secret,
     )?;
-    launch_dashboard(paths, profile_id, vault_secret).await
+    let profile = read_profile(paths, &profile_id)?;
+    validate_profile_unlock_with_passphrase(paths, &profile_id, Some(vault_secret.clone()))?;
+    match mode {
+        LoadMode::StatusOnly => {
+            print_profile_load_summary(paths, &profile)?;
+            Ok(())
+        }
+        LoadMode::StartAttached => start_profile_attached(paths, &profile, vault_secret).await,
+        LoadMode::StartBackground => {
+            let (metadata, existing) =
+                ensure_profile_daemon(paths, &profile.id, Some(vault_secret)).await?;
+            print_daemon_started_summary(&profile, &metadata, existing);
+            Ok(())
+        }
+    }
 }
 
 async fn handle_import(paths: &ShellPaths, args: ImportArgs) -> Result<()> {
@@ -572,16 +609,38 @@ async fn handle_import(paths: &ShellPaths, args: ImportArgs) -> Result<()> {
         if let Err(err) = publish_profile_backup(paths, &profile.id, None).await {
             eprintln!("warning: failed to publish encrypted profile backup: {err}");
         }
+        let daemon = if args.daemon {
+            let (metadata, existing) =
+                ensure_profile_daemon(paths, &profile.id, Some(vault_secret.clone())).await?;
+            Some((metadata, existing))
+        } else {
+            None
+        };
         if args.json {
             return print_json(&serde_json::json!({
                 "import": import,
+                "daemon": daemon.as_ref().map(|(metadata, existing)| serde_json::json!({
+                    "started": !existing,
+                    "metadata": metadata,
+                })),
                 "next": {
                     "load": format!("igloo-shell profile load {}", profile.id),
+                    "start": format!("igloo-shell profile load {} --start", profile.id),
+                    "daemon": format!("igloo-shell profile load {} --daemon", profile.id),
                 }
             }));
         }
-        println!("Import complete. Launching dashboard for profile {}.", profile.id);
-        return launch_dashboard(paths, profile.id.clone(), vault_secret).await;
+        if args.start {
+            return start_profile_attached(paths, profile, vault_secret).await;
+        }
+        if let Some((metadata, existing)) = daemon {
+            print_profile_ready_summary("Import complete.", profile);
+            print_daemon_started_summary(profile, &metadata, existing);
+            return Ok(());
+        }
+        print_profile_ready_summary("Import complete.", profile);
+        print_profile_next_commands(&profile.id);
+        return Ok(());
     }
     print_json(&import)
 }
@@ -609,23 +668,23 @@ fn handle_export(paths: &ShellPaths, args: ExportArgs) -> Result<()> {
             vault_passphrase,
             Some(std::path::Path::new(&args.out)),
         )?)?,
-        "bfonboard" => serde_json::to_value(export_profile_as_bfonboard(
-            paths,
-            &args.profile_id,
-            std::path::Path::new(
-                &args
-                    .recipient_share
-                    .ok_or_else(|| anyhow!("--recipient-share is required for --format bfonboard"))?,
-            ),
-            if args.relay_urls.is_empty() {
-                None
-            } else {
-                Some(args.relay_urls)
-            },
-            require_env_secret(args.package_password_env, "package password")?,
-            vault_passphrase,
-            Some(std::path::Path::new(&args.out)),
-        )?)?,
+        "bfonboard" => {
+            serde_json::to_value(export_profile_as_bfonboard(
+                paths,
+                &args.profile_id,
+                std::path::Path::new(&args.recipient_share.ok_or_else(|| {
+                    anyhow!("--recipient-share is required for --format bfonboard")
+                })?),
+                if args.relay_urls.is_empty() {
+                    None
+                } else {
+                    Some(args.relay_urls)
+                },
+                require_env_secret(args.package_password_env, "package password")?,
+                vault_passphrase,
+                Some(std::path::Path::new(&args.out)),
+            )?)?
+        }
         _ => bail!(
             "unsupported profile export format {}; expected raw, bfprofile, bfshare, or bfonboard",
             args.format
@@ -636,7 +695,6 @@ fn handle_export(paths: &ShellPaths, args: ExportArgs) -> Result<()> {
 
 async fn handle_recover(paths: &ShellPaths, args: RecoverArgs) -> Result<()> {
     let package_raw = read_package_or_inline(&args.bfshare_or_path)?;
-    let label = resolve_profile_label(args.label)?;
     let package_secret = resolve_package_secret(
         args.package_secret,
         args.package_secret_file,
@@ -650,29 +708,63 @@ async fn handle_recover(paths: &ShellPaths, args: RecoverArgs) -> Result<()> {
         "recover requires vault secret input; use --vault-secret / --vault-secret-file, or run on a TTY",
         prompt_vault_secret,
     )?;
-    let import = recover_profile_from_bfshare_value(
-        paths,
-        &package_raw,
-        package_secret,
-        Some(label),
-        None,
-        Some(vault_secret.clone()),
-    )
-    .await?;
+    let import = if let Some(target_profile_id) = args.replace_profile.as_deref() {
+        apply_rotation_update_from_bfshare_value(
+            paths,
+            target_profile_id,
+            &package_raw,
+            package_secret,
+            Some(vault_secret.clone()),
+        )
+        .await?
+    } else {
+        let label = resolve_profile_label(args.label)?;
+        recover_profile_from_bfshare_value(
+            paths,
+            &package_raw,
+            package_secret,
+            Some(label),
+            None,
+            Some(vault_secret.clone()),
+        )
+        .await?
+    };
     if let Ok(profile) = result_profile(&import) {
         if let Err(err) = publish_profile_backup(paths, &profile.id, None).await {
             eprintln!("warning: failed to publish encrypted profile backup: {err}");
         }
+        let daemon = if args.daemon {
+            let (metadata, existing) =
+                ensure_profile_daemon(paths, &profile.id, Some(vault_secret.clone())).await?;
+            Some((metadata, existing))
+        } else {
+            None
+        };
         if args.json {
             return print_json(&serde_json::json!({
                 "import": import,
+                "daemon": daemon.as_ref().map(|(metadata, existing)| serde_json::json!({
+                    "started": !existing,
+                    "metadata": metadata,
+                })),
                 "next": {
                     "load": format!("igloo-shell profile load {}", profile.id),
+                    "start": format!("igloo-shell profile load {} --start", profile.id),
+                    "daemon": format!("igloo-shell profile load {} --daemon", profile.id),
                 }
             }));
         }
-        println!("Recovery complete. Launching dashboard for profile {}.", profile.id);
-        return launch_dashboard(paths, profile.id.clone(), vault_secret).await;
+        if args.start {
+            return start_profile_attached(paths, profile, vault_secret).await;
+        }
+        if let Some((metadata, existing)) = daemon {
+            print_profile_ready_summary("Recovery complete.", profile);
+            print_daemon_started_summary(profile, &metadata, existing);
+            return Ok(());
+        }
+        print_profile_ready_summary("Recovery complete.", profile);
+        print_profile_next_commands(&profile.id);
+        return Ok(());
     }
     print_json(&import)
 }
@@ -770,8 +862,7 @@ async fn handle_keygen(paths: &ShellPaths, args: KeygenArgs) -> Result<()> {
             distribution_secret.clone(),
         )?;
         let path = export_root.join(format!("member-{}.bfonboard.txt", share.member_idx));
-        fs::write(&path, &package)
-            .with_context(|| format!("write {}", path.display()))?;
+        fs::write(&path, &package).with_context(|| format!("write {}", path.display()))?;
         packages.push(serde_json::json!({
             "member_idx": share.member_idx,
             "label": share.label,
@@ -784,6 +875,8 @@ async fn handle_keygen(paths: &ShellPaths, args: KeygenArgs) -> Result<()> {
             "generated_packages": packages,
             "next": {
                 "load": format!("igloo-shell profile load {}", profile.id),
+                "start": format!("igloo-shell profile load {} --start", profile.id),
+                "daemon": format!("igloo-shell profile load {} --daemon", profile.id),
             }
         }));
     }
@@ -791,7 +884,9 @@ async fn handle_keygen(paths: &ShellPaths, args: KeygenArgs) -> Result<()> {
         "Keyset generated. Saved onboarding packages for the remaining members under {}.",
         export_root.display()
     );
-    launch_dashboard(paths, profile.id.clone(), vault_secret).await
+    print_profile_ready_summary("Local profile created.", &profile);
+    print_profile_next_commands(&profile.id);
+    Ok(())
 }
 
 async fn handle_setup(paths: &ShellPaths, args: SetupArgs) -> Result<()> {
@@ -834,17 +929,40 @@ async fn handle_onboard(paths: &ShellPaths, args: OnboardArgs) -> Result<()> {
     .await?;
     let profile = result_profile(&import)?;
     let profile_id = profile.id.clone();
+    let daemon = if args.daemon {
+        let (metadata, existing) =
+            ensure_profile_daemon(paths, &profile_id, Some(vault_secret.clone())).await?;
+        Some((metadata, existing))
+    } else {
+        None
+    };
 
     if args.json {
         print_json(&serde_json::json!({
             "import": import,
+            "daemon": daemon.as_ref().map(|(metadata, existing)| serde_json::json!({
+                "started": !existing,
+                "metadata": metadata,
+            })),
             "next": {
                 "load": format!("igloo-shell profile load {}", profile_id),
+                "start": format!("igloo-shell profile load {} --start", profile_id),
+                "daemon": format!("igloo-shell profile load {} --daemon", profile_id),
             }
         }))
     } else {
-        println!("Onboarding complete. Launching dashboard for profile {profile_id}.");
-        launch_dashboard(paths, profile_id, vault_secret).await
+        if args.start {
+            return start_profile_attached(paths, profile, vault_secret).await;
+        }
+        if let Some((metadata, existing)) = daemon {
+            print_profile_ready_summary("Onboarding complete.", profile);
+            print_daemon_started_summary(profile, &metadata, existing);
+            Ok(())
+        } else {
+            print_profile_ready_summary("Onboarding complete.", profile);
+            print_profile_next_commands(&profile_id);
+            Ok(())
+        }
     }
 }
 
@@ -1090,7 +1208,8 @@ async fn handle_policy(paths: &ShellPaths, command: PolicyCommands) -> Result<()
             profile,
             peer_pubkey,
         } => {
-            let (manifest, effective_override) = clear_profile_peer_policy(paths, &profile, &peer_pubkey)?;
+            let (manifest, effective_override) =
+                clear_profile_peer_policy(paths, &profile, &peer_pubkey)?;
             let result = daemon_runtime_query(
                 paths,
                 &profile,
@@ -1282,7 +1401,11 @@ fn validate_member_index(
     draft: &igloo_shell_core::shell::GeneratedKeysetDraft,
     member_idx: u16,
 ) -> Result<u16> {
-    if draft.shares.iter().any(|share| share.member_idx == member_idx) {
+    if draft
+        .shares
+        .iter()
+        .any(|share| share.member_idx == member_idx)
+    {
         return Ok(member_idx);
     }
     bail!("member index {member_idx} is not available in this generated keyset")
@@ -1385,7 +1508,7 @@ fn prompt_hidden_secret(lines: &[&str], prompt: &str) -> Result<String> {
 fn prompt_profile_label() -> Result<String> {
     loop {
         println!("Choose a name for this profile before entering any secrets.");
-        println!("This label will be shown in the TUI profile picker.");
+        println!("This label will be shown in profile selection and status output.");
         print!("Profile name: ");
         std::io::Write::flush(&mut std::io::stdout()).context("flush profile name prompt")?;
 
@@ -1435,7 +1558,7 @@ fn prompt_load_vault_secret() -> Result<String> {
     prompt_hidden_secret(
         &[
             "Type the vault secret for the selected profile now.",
-            "igloo-shell will use it to unlock the profile and open the dashboard.",
+            "igloo-shell will use it to unlock the profile on this device.",
         ],
         "Vault secret",
     )
@@ -1507,9 +1630,7 @@ fn prompt_relay_urls() -> Result<Vec<String>> {
     }
 }
 
-fn prompt_member_index(
-    draft: &igloo_shell_core::shell::GeneratedKeysetDraft,
-) -> Result<u16> {
+fn prompt_member_index(draft: &igloo_shell_core::shell::GeneratedKeysetDraft) -> Result<u16> {
     println!("Select which generated share should stay on this device:");
     for share in &draft.shares {
         println!("  {}: {}", share.member_idx, share.label);
@@ -1530,7 +1651,9 @@ fn prompt_line(lines: &[&str], prompt: &str) -> Result<String> {
     print!("{prompt}: ");
     std::io::Write::flush(&mut std::io::stdout()).context("flush prompt")?;
     let mut input = String::new();
-    std::io::stdin().read_line(&mut input).context("read prompt input")?;
+    std::io::stdin()
+        .read_line(&mut input)
+        .context("read prompt input")?;
     let value = input.trim().to_string();
     if value.is_empty() {
         bail!("{prompt} cannot be empty");
@@ -1575,15 +1698,115 @@ fn prompt_select_profile(paths: &ShellPaths) -> Result<String> {
     }
 }
 
-async fn launch_dashboard(paths: &ShellPaths, profile_id: String, vault_secret: String) -> Result<()> {
-    tui::run_tui_with_options(
-        paths,
-        tui::TuiLaunchOptions {
-            profile_id: Some(profile_id),
-            initial_vault_secret: Some(vault_secret),
-        },
-    )
-    .await
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoadMode {
+    StatusOnly,
+    StartAttached,
+    StartBackground,
+}
+
+fn load_mode(args: &LoadArgs) -> LoadMode {
+    if args.start {
+        LoadMode::StartAttached
+    } else if args.daemon {
+        LoadMode::StartBackground
+    } else {
+        LoadMode::StatusOnly
+    }
+}
+
+fn short_profile_id(profile_id: &str) -> &str {
+    &profile_id[..profile_id.len().min(8)]
+}
+
+fn print_profile_ready_summary(prefix: &str, profile: &igloo_shell_core::shell::ProfileManifest) {
+    println!(
+        "{prefix} Profile \"{}\" ({}) is ready.",
+        profile.label,
+        short_profile_id(&profile.id)
+    );
+}
+
+fn print_profile_next_commands(profile_id: &str) {
+    println!("Next commands:");
+    println!("  igloo-shell profile load {profile_id}");
+    println!("  igloo-shell profile load {profile_id} --start");
+    println!("  igloo-shell profile load {profile_id} --daemon");
+}
+
+fn print_daemon_started_summary(
+    profile: &igloo_shell_core::shell::ProfileManifest,
+    metadata: &DaemonMetadata,
+    existing: bool,
+) {
+    let state = if existing {
+        "already running"
+    } else {
+        "started"
+    };
+    println!(
+        "Daemon {state} for \"{}\" ({}).",
+        profile.label,
+        short_profile_id(&profile.id)
+    );
+    println!("  pid: {}", metadata.pid);
+    println!("  socket: {}", metadata.socket_path);
+    println!("  log: {}", metadata.log_path);
+}
+
+fn print_profile_load_summary(
+    paths: &ShellPaths,
+    profile: &igloo_shell_core::shell::ProfileManifest,
+) -> Result<()> {
+    println!(
+        "Profile loaded: \"{}\" ({})",
+        profile.label,
+        short_profile_id(&profile.id)
+    );
+    println!("Vault unlock succeeded.");
+    let daemon_state = if read_daemon_metadata(paths, &profile.id).is_ok() {
+        "running or recorded"
+    } else {
+        "not running"
+    };
+    println!("Daemon: {daemon_state}");
+    print_profile_next_commands(&profile.id);
+    Ok(())
+}
+
+async fn ensure_profile_daemon(
+    paths: &ShellPaths,
+    profile_id: &str,
+    vault_secret: Option<String>,
+) -> Result<(DaemonMetadata, bool)> {
+    if let Ok(metadata) = read_daemon_metadata(paths, profile_id) {
+        if daemon_runtime_query(paths, profile_id, ControlCommand::RuntimeMetadata)
+            .await
+            .is_ok()
+        {
+            return Ok((metadata, true));
+        }
+        let _ = remove_daemon_metadata(paths, profile_id);
+    }
+
+    let metadata = if let Some(secret) = vault_secret {
+        start_profile_daemon_with_passphrase(paths, profile_id, Some(secret)).await?
+    } else {
+        start_profile_daemon(paths, profile_id).await?
+    };
+    Ok((metadata, false))
+}
+
+async fn start_profile_attached(
+    paths: &ShellPaths,
+    profile: &igloo_shell_core::shell::ProfileManifest,
+    vault_secret: String,
+) -> Result<()> {
+    let (metadata, existing) =
+        ensure_profile_daemon(paths, &profile.id, Some(vault_secret)).await?;
+    print_daemon_started_summary(profile, &metadata, existing);
+    println!("Streaming daemon log. Press Ctrl-C to exit.");
+    follow_log_file(Path::new(&metadata.log_path)).await
 }
 
 fn result_profile(
@@ -1814,7 +2037,9 @@ fn log_options(args: &TraceArgs) -> LogOptions {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_profile_label_with, resolve_secret_source_with};
+    use clap::Parser;
+
+    use super::{Cli, resolve_profile_label_with, resolve_secret_source_with};
 
     #[test]
     fn secret_source_prefers_flag_value() {
@@ -1861,5 +2086,101 @@ mod tests {
         let err = resolve_profile_label_with(None, false, || panic!("prompt should not be used"))
             .expect_err("missing label should fail");
         assert!(err.to_string().contains("--label"));
+    }
+
+    #[test]
+    fn load_cli_rejects_conflicting_daemon_flags() {
+        let err = Cli::try_parse_from([
+            "igloo-shell",
+            "profile",
+            "load",
+            "demo",
+            "--start",
+            "--daemon",
+        ])
+        .expect_err("conflicting flags should fail");
+        assert!(err.to_string().contains("--start"));
+    }
+
+    #[test]
+    fn onboard_cli_accepts_start_flag() {
+        let cli = Cli::try_parse_from([
+            "igloo-shell",
+            "onboard",
+            "package",
+            "--label",
+            "demo",
+            "--onboard-secret",
+            "invite",
+            "--vault-secret",
+            "vault",
+            "--start",
+        ])
+        .expect("start flag should parse");
+        match cli.command {
+            super::Commands::Onboard(args) => assert!(args.start),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn import_cli_accepts_start_flag() {
+        let cli = Cli::try_parse_from([
+            "igloo-shell",
+            "import",
+            "package",
+            "--label",
+            "demo",
+            "--package-secret",
+            "pkg",
+            "--vault-secret",
+            "vault",
+            "--start",
+        ])
+        .expect("start flag should parse");
+        match cli.command {
+            super::Commands::Import(args) => assert!(args.start),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn recover_cli_accepts_start_flag() {
+        let cli = Cli::try_parse_from([
+            "igloo-shell",
+            "recover",
+            "package",
+            "--label",
+            "demo",
+            "--package-secret",
+            "pkg",
+            "--vault-secret",
+            "vault",
+            "--start",
+        ])
+        .expect("start flag should parse");
+        match cli.command {
+            super::Commands::Recover(args) => assert!(args.start),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn onboard_cli_rejects_start_with_json() {
+        let err = Cli::try_parse_from([
+            "igloo-shell",
+            "onboard",
+            "package",
+            "--label",
+            "demo",
+            "--onboard-secret",
+            "invite",
+            "--vault-secret",
+            "vault",
+            "--start",
+            "--json",
+        ])
+        .expect_err("conflicting flags should fail");
+        assert!(err.to_string().contains("--start"));
     }
 }

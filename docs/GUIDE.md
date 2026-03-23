@@ -72,7 +72,9 @@ cargo run -p igloo-shell-cli -- profile load
 
 - if you omit the profile id, the CLI shows a simple numbered profile picker
 - after you pick a profile, the CLI prompts for the vault secret
-- once the profile unlocks, `igloo-shell` launches the logged-in shell directly
+- once the profile unlocks, `igloo-shell` prints profile status and next commands by default
+- `profile load --start` starts the daemon and attaches to the daemon log
+- `profile load --daemon` starts the daemon in the background and exits
 
 You can also enter through the flow-specific top-level commands:
 
@@ -81,13 +83,7 @@ You can also enter through the flow-specific top-level commands:
 - `igloo-shell recover <bfshare-or-path>`
 - `igloo-shell keygen`
 
-Those commands collect their inputs in the CLI, then launch the logged-in shell on success. Once loaded, the TUI has only three top tabs:
-
-- `Dashboard`
-- `Permissions`
-- `Settings`
-
-Navigation is arrow-key first with `Enter` to select, `Esc` to go back, and `q` to quit. Logging out stops the active daemon and exits back to the terminal.
+Those commands collect their inputs in the CLI, then print the created profile and next commands on success. `onboard`, `import`, and `recover` support `--daemon` for background start and `--start` for immediate foreground attach.
 
 ## Next Reading
 

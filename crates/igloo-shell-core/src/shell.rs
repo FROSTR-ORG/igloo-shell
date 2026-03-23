@@ -1,6 +1,6 @@
+use std::collections::HashMap;
 use std::fs;
 use std::fs::OpenOptions;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -17,18 +17,18 @@ use bifrost_app::runtime::{AppOptions, ResolvedAppConfig};
 use bifrost_codec::{
     parse_group_package, parse_share_package, wire::GroupPackageWire, wire::SharePackageWire,
 };
+use bifrost_core::get_group_id;
 use bifrost_core::types::{PeerPolicy, PeerPolicyOverride, PolicyOverrideValue};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use frostr_utils::{
-    BfManualPeerPolicyOverride, BfOnboardPayload, BfProfileDevice, BfProfileGroup,
-    BfProfilePayload, BfSharePayload, CreateKeysetConfig, PROFILE_BACKUP_EVENT_KIND,
-    BfRemotePeerPolicyObservation, bf_peer_scoped_policy_profile_to_core,
-    build_profile_backup_event, core_peer_policy_override_to_bf, create_keyset,
-    create_encrypted_profile_backup, decode_bfprofile_package, decode_bfshare_package,
-    decode_bfonboard_package, derive_profile_id_from_share_secret, encode_bfonboard_package, encode_bfprofile_package,
-    encode_bfshare_package,
-    parse_profile_backup_event,
+    BfGroupMember, BfManualPeerPolicyOverride, BfOnboardPayload, BfProfileDevice, BfProfileGroup,
+    BfProfilePayload, BfRemotePeerPolicyObservation, BfSharePayload, CreateKeysetConfig,
+    PROFILE_BACKUP_EVENT_KIND, bf_peer_scoped_policy_profile_to_core, build_profile_backup_event,
+    core_peer_policy_override_to_bf, create_encrypted_profile_backup, create_keyset,
+    decode_bfonboard_package, decode_bfprofile_package, decode_bfshare_package,
+    derive_profile_id_from_share_secret, encode_bfonboard_package, encode_bfprofile_package,
+    encode_bfshare_package, parse_profile_backup_event,
 };
 use futures_util::{SinkExt, StreamExt};
 use k256::elliptic_curve::sec1::ToEncodedPoint;
@@ -37,9 +37,9 @@ use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::Digest;
+use tokio::time::{Duration as TokioDuration, timeout};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
-use tokio::time::{timeout, Duration as TokioDuration};
 
 const SCHEMA_VERSION: u32 = 1;
 const VAULT_ENV_PASSPHRASE: &str = "IGLOO_SHELL_VAULT_PASSPHRASE";
@@ -571,7 +571,10 @@ fn policy_field_mut(
     }
 }
 
-fn merge_policy_override(base: &PeerPolicyOverride, next: &PeerPolicyOverride) -> PeerPolicyOverride {
+fn merge_policy_override(
+    base: &PeerPolicyOverride,
+    next: &PeerPolicyOverride,
+) -> PeerPolicyOverride {
     fn resolve(base: PolicyOverrideValue, next: PolicyOverrideValue) -> PolicyOverrideValue {
         match next {
             PolicyOverrideValue::Unset => base,
@@ -716,7 +719,7 @@ pub fn resolve_profile_runtime(
     let share = parse_share_package(&share_raw).context("parse profile share package")?;
     let (peers, manual_policy_overrides) =
         resolve_profile_peers_and_overrides(&group, &share, profile.policy_overrides.clone())
-        .context("resolve peer policy overrides")?;
+            .context("resolve peer policy overrides")?;
     let remote_policy_observations =
         parse_remote_policy_observations_doc(profile.remote_policy_observations.clone())
             .context("resolve remote policy observations")?;
@@ -809,7 +812,8 @@ fn peer_pubkeys_by<'a, F>(peers: &'a [Value], predicate: F) -> Vec<String>
 where
     F: Fn(&'a Value) -> bool,
 {
-    peers.iter()
+    peers
+        .iter()
         .filter(|peer| predicate(peer))
         .filter_map(|peer| peer.get("pubkey").and_then(Value::as_str))
         .map(ToOwned::to_owned)
@@ -858,7 +862,8 @@ pub async fn check_profile_runtime(
     let relay_connected_count = relays.iter().filter(|relay| relay.ok).count();
     let checked_at = now_unix_secs();
 
-    let runtime_status = daemon_runtime_query(paths, profile_id, ControlCommand::RuntimeStatus).await;
+    let runtime_status =
+        daemon_runtime_query(paths, profile_id, ControlCommand::RuntimeStatus).await;
     let mut reasons_not_ready = Vec::new();
     let mut runtime_online = false;
     let mut share_public_key = None;
@@ -923,7 +928,8 @@ pub async fn check_profile_runtime(
                 .get("peers")
                 .and_then(Value::as_array)
                 .map(|peers| {
-                    peers.iter()
+                    peers
+                        .iter()
                         .filter(|peer| peer.get("online").and_then(Value::as_bool).unwrap_or(false))
                         .count()
                 })
@@ -965,7 +971,9 @@ pub async fn check_profile_runtime(
                         > 0
             });
             let sign_initiator_peers = peer_pubkeys_by(peers, |peer| {
-                peer.get("can_sign").and_then(Value::as_bool).unwrap_or(false)
+                peer.get("can_sign")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
             });
             let all_peer_pubkeys = peer_pubkeys_by(peers, |_| true);
             let missing_initiators = all_peer_pubkeys
@@ -994,13 +1002,18 @@ pub async fn check_profile_runtime(
             if !sign_ready || !sign_responder_ready {
                 reasons_not_ready.push("insufficient_signing_peers".to_string());
             }
-            if degraded_reasons.as_array().is_some_and(|reasons| !reasons.is_empty()) {
+            if degraded_reasons
+                .as_array()
+                .is_some_and(|reasons| !reasons.is_empty())
+            {
                 reasons_not_ready.push("runtime_degraded".to_string());
             }
 
             details["readiness"] = readiness;
-            details["sign_initiator_peer_count"] = Value::Number((sign_initiator_peers.len() as u64).into());
-            details["sign_responder_peer_count"] = Value::Number((sign_responder_peers.len() as u64).into());
+            details["sign_initiator_peer_count"] =
+                Value::Number((sign_initiator_peers.len() as u64).into());
+            details["sign_responder_peer_count"] =
+                Value::Number((sign_responder_peers.len() as u64).into());
             details["sign_initiator_peers"] = serde_json::json!(sign_initiator_peers);
             details["sign_responder_peers"] = serde_json::json!(sign_responder_peers);
             details["missing_sign_initiator_peers"] = serde_json::json!(missing_initiators);
@@ -1038,7 +1051,10 @@ pub async fn check_profile_runtime(
             if !ecdh_ready {
                 reasons_not_ready.push("insufficient_ecdh_peers".to_string());
             }
-            if degraded_reasons.as_array().is_some_and(|reasons| !reasons.is_empty()) {
+            if degraded_reasons
+                .as_array()
+                .is_some_and(|reasons| !reasons.is_empty())
+            {
                 reasons_not_ready.push("runtime_degraded".to_string());
             }
 
@@ -1480,10 +1496,13 @@ pub async fn preview_bfshare_recovery(
     package_password: String,
     label: Option<String>,
 ) -> Result<(ProfilePreview, BfProfilePayload)> {
-    let share = decode_bfshare_package(package_raw, &package_password).context("decode bfshare package")?;
+    let share =
+        decode_bfshare_package(package_raw, &package_password).context("decode bfshare package")?;
     let author_pubkey = derive_member_pubkey_hex(hex_to_bytes32(&share.share_secret)?)?;
-    let event = fetch_latest_nostr_event(&share.relays, &author_pubkey, PROFILE_BACKUP_EVENT_KIND).await?;
-    let backup = parse_profile_backup_event(&event, &share.share_secret).context("parse encrypted profile backup")?;
+    let event =
+        fetch_latest_nostr_event(&share.relays, &author_pubkey, PROFILE_BACKUP_EVENT_KIND).await?;
+    let backup = parse_profile_backup_event(&event, &share.share_secret)
+        .context("parse encrypted profile backup")?;
     let payload = BfProfilePayload {
         profile_id: derive_profile_id_for_share_secret(&share.share_secret)?,
         version: backup.version,
@@ -1556,7 +1575,8 @@ pub fn export_profile_as_bfonboard(
     let payload = profile_to_package_payload(paths, profile_id, vault_passphrase)?;
     let recipient_share_raw = fs::read_to_string(recipient_share_path)
         .with_context(|| format!("read {}", recipient_share_path.display()))?;
-    let recipient_share = parse_share_package(&recipient_share_raw).context("parse recipient share")?;
+    let recipient_share =
+        parse_share_package(&recipient_share_raw).context("parse recipient share")?;
     let relays = relay_urls
         .unwrap_or(payload.device.relays)
         .into_iter()
@@ -1610,10 +1630,13 @@ pub async fn recover_profile_from_bfshare_value(
     relay_profile: Option<String>,
     vault_passphrase: Option<String>,
 ) -> Result<ProfileImportResult> {
-    let share = decode_bfshare_package(package_raw, &package_password).context("decode bfshare package")?;
+    let share =
+        decode_bfshare_package(package_raw, &package_password).context("decode bfshare package")?;
     let author_pubkey = derive_member_pubkey_hex(hex_to_bytes32(&share.share_secret)?)?;
-    let event = fetch_latest_nostr_event(&share.relays, &author_pubkey, PROFILE_BACKUP_EVENT_KIND).await?;
-    let backup = parse_profile_backup_event(&event, &share.share_secret).context("parse encrypted profile backup")?;
+    let event =
+        fetch_latest_nostr_event(&share.relays, &author_pubkey, PROFILE_BACKUP_EVENT_KIND).await?;
+    let backup = parse_profile_backup_event(&event, &share.share_secret)
+        .context("parse encrypted profile backup")?;
     let payload = BfProfilePayload {
         profile_id: derive_profile_id_for_share_secret(&share.share_secret)?,
         version: backup.version,
@@ -1627,6 +1650,132 @@ pub async fn recover_profile_from_bfshare_value(
         group: backup.group,
     };
     import_profile_from_bfprofile_payload(paths, payload, None, relay_profile, vault_passphrase)
+}
+
+pub fn finalize_rotation_update_import(
+    paths: &ShellPaths,
+    target: &ProfileManifest,
+    target_payload: BfProfilePayload,
+    rotated_payload: BfProfilePayload,
+    vault_passphrase: Option<String>,
+) -> Result<ProfileImportResult> {
+    if rotated_payload.group.group_public_key != target_payload.group.group_public_key {
+        bail!("rotation update does not match the selected profile group public key");
+    }
+    if rotated_payload.profile_id == target_payload.profile_id {
+        bail!("rotation update did not produce a new device profile id");
+    }
+
+    let import = import_profile_from_bfprofile_payload(
+        paths,
+        rotated_payload,
+        Some(target.label.clone()),
+        Some(target.relay_profile.clone()),
+        vault_passphrase,
+    )?;
+
+    let ProfileImportResult::ProfileCreated {
+        profile,
+        vault_record,
+        diagnostics,
+        warnings,
+    } = import
+    else {
+        bail!("rotation update did not produce a profile");
+    };
+
+    let mut migrated = profile.clone();
+    migrated.runtime_options = target.runtime_options.clone();
+    migrated.last_used_at = target.last_used_at;
+    write_profile(paths, &migrated)?;
+
+    remove_profile(paths, &target.id)?;
+    touch_last_used_profile(paths, &migrated.id)?;
+
+    Ok(ProfileImportResult::ProfileCreated {
+        profile: migrated,
+        vault_record,
+        diagnostics,
+        warnings,
+    })
+}
+
+pub async fn apply_rotation_update_from_bfonboard_value(
+    paths: &ShellPaths,
+    target_profile_id: &str,
+    package_raw: &str,
+    onboarding_password: String,
+    vault_passphrase: Option<String>,
+) -> Result<ProfileImportResult> {
+    let target = read_profile(paths, target_profile_id)?;
+    let target_payload =
+        profile_to_package_payload(paths, target_profile_id, vault_passphrase.clone())?;
+    let connection = connect_onboarding_package_preview(package_raw, onboarding_password).await?;
+
+    if connection.preview.group_public_key != target_payload.group.group_public_key {
+        bail!("rotation update does not match the selected profile group public key");
+    }
+    if connection.preview.profile_id == target_payload.profile_id {
+        bail!("rotation update did not produce a new device profile id");
+    }
+
+    let rotated_payload = BfProfilePayload {
+        profile_id: connection.preview.profile_id.clone(),
+        version: 1,
+        device: BfProfileDevice {
+            name: target.label.clone(),
+            share_secret: hex::encode(connection.completion.share.seckey),
+            manual_peer_policy_overrides: Vec::new(),
+            remote_peer_policy_observations: Vec::new(),
+            relays: connection.completion.relays.clone(),
+        },
+        group: BfProfileGroup {
+            keyset_name: target_payload.group.keyset_name.clone(),
+            group_public_key: hex::encode(connection.completion.group.group_pk),
+            threshold: connection.completion.group.threshold,
+            total_count: connection.completion.group.members.len() as u16,
+            members: connection
+                .completion
+                .group
+                .members
+                .iter()
+                .map(|member| BfGroupMember {
+                    index: member.idx,
+                    share_public_key: hex::encode(&member.pubkey[1..]),
+                })
+                .collect(),
+        },
+    };
+
+    finalize_rotation_update_import(
+        paths,
+        &target,
+        target_payload,
+        rotated_payload,
+        vault_passphrase,
+    )
+}
+
+pub async fn apply_rotation_update_from_bfshare_value(
+    paths: &ShellPaths,
+    target_profile_id: &str,
+    package_raw: &str,
+    package_password: String,
+    vault_passphrase: Option<String>,
+) -> Result<ProfileImportResult> {
+    let target = read_profile(paths, target_profile_id)?;
+    let target_payload =
+        profile_to_package_payload(paths, target_profile_id, vault_passphrase.clone())?;
+    let (_, rotated_payload) =
+        preview_bfshare_recovery(package_raw, package_password, Some(target.label.clone())).await?;
+
+    finalize_rotation_update_import(
+        paths,
+        &target,
+        target_payload,
+        rotated_payload,
+        vault_passphrase,
+    )
 }
 
 pub(crate) fn import_profile_from_bfprofile_payload(
@@ -1686,7 +1835,8 @@ pub(crate) fn import_profile_from_bfprofile_payload(
         relay_profile_id,
         now,
     );
-    profile.policy_overrides = build_policy_overrides_value(&payload.device.manual_peer_policy_overrides)?;
+    profile.policy_overrides =
+        build_policy_overrides_value(&payload.device.manual_peer_policy_overrides)?;
     profile.remote_policy_observations =
         build_remote_policy_observations_value(&payload.device.remote_peer_policy_observations)?;
     fs::create_dir_all(paths.profile_state_dir(&profile.id))
@@ -1741,7 +1891,11 @@ pub fn import_generated_share(
     if relay_urls.is_empty() {
         bail!("at least one relay is required");
     }
-    let Some(share) = draft.share_packages.iter().find(|share| share.idx == member_idx) else {
+    let Some(share) = draft
+        .share_packages
+        .iter()
+        .find(|share| share.idx == member_idx)
+    else {
         bail!("generated share {member_idx} not found");
     };
     let local_pubkey = derive_member_pubkey_hex(share.seckey)?;
@@ -1797,7 +1951,11 @@ pub fn export_generated_onboarding_package(
     if relays.is_empty() {
         bail!("at least one relay is required");
     }
-    let Some(share) = draft.share_packages.iter().find(|share| share.idx == member_idx) else {
+    let Some(share) = draft
+        .share_packages
+        .iter()
+        .find(|share| share.idx == member_idx)
+    else {
         bail!("generated share {member_idx} not found");
     };
     encode_bfonboard_package(
@@ -1817,7 +1975,8 @@ fn profile_to_package_payload(
     vault_passphrase: Option<String>,
 ) -> Result<BfProfilePayload> {
     let profile = read_profile(paths, profile_id)?;
-    let (manifest, resolved) = resolve_profile_runtime_with_passphrase(paths, profile_id, vault_passphrase)?;
+    let (manifest, resolved) =
+        resolve_profile_runtime_with_passphrase(paths, profile_id, vault_passphrase)?;
     let manual_peer_policy_overrides = resolved
         .manual_policy_overrides
         .iter()
@@ -1912,55 +2071,95 @@ fn build_policy_overrides_value(policies: &[BfManualPeerPolicyOverride]) -> Resu
                 policy_override: PeerPolicyOverride {
                     request: bifrost_core::types::MethodPolicyOverride {
                         echo: match policy.policy.request.echo {
-                            frostr_utils::BfPolicyOverrideValue::Unset => PolicyOverrideValue::Unset,
-                            frostr_utils::BfPolicyOverrideValue::Allow => PolicyOverrideValue::Allow,
+                            frostr_utils::BfPolicyOverrideValue::Unset => {
+                                PolicyOverrideValue::Unset
+                            }
+                            frostr_utils::BfPolicyOverrideValue::Allow => {
+                                PolicyOverrideValue::Allow
+                            }
                             frostr_utils::BfPolicyOverrideValue::Deny => PolicyOverrideValue::Deny,
                         },
                         ping: match policy.policy.request.ping {
-                            frostr_utils::BfPolicyOverrideValue::Unset => PolicyOverrideValue::Unset,
-                            frostr_utils::BfPolicyOverrideValue::Allow => PolicyOverrideValue::Allow,
+                            frostr_utils::BfPolicyOverrideValue::Unset => {
+                                PolicyOverrideValue::Unset
+                            }
+                            frostr_utils::BfPolicyOverrideValue::Allow => {
+                                PolicyOverrideValue::Allow
+                            }
                             frostr_utils::BfPolicyOverrideValue::Deny => PolicyOverrideValue::Deny,
                         },
                         onboard: match policy.policy.request.onboard {
-                            frostr_utils::BfPolicyOverrideValue::Unset => PolicyOverrideValue::Unset,
-                            frostr_utils::BfPolicyOverrideValue::Allow => PolicyOverrideValue::Allow,
+                            frostr_utils::BfPolicyOverrideValue::Unset => {
+                                PolicyOverrideValue::Unset
+                            }
+                            frostr_utils::BfPolicyOverrideValue::Allow => {
+                                PolicyOverrideValue::Allow
+                            }
                             frostr_utils::BfPolicyOverrideValue::Deny => PolicyOverrideValue::Deny,
                         },
                         sign: match policy.policy.request.sign {
-                            frostr_utils::BfPolicyOverrideValue::Unset => PolicyOverrideValue::Unset,
-                            frostr_utils::BfPolicyOverrideValue::Allow => PolicyOverrideValue::Allow,
+                            frostr_utils::BfPolicyOverrideValue::Unset => {
+                                PolicyOverrideValue::Unset
+                            }
+                            frostr_utils::BfPolicyOverrideValue::Allow => {
+                                PolicyOverrideValue::Allow
+                            }
                             frostr_utils::BfPolicyOverrideValue::Deny => PolicyOverrideValue::Deny,
                         },
                         ecdh: match policy.policy.request.ecdh {
-                            frostr_utils::BfPolicyOverrideValue::Unset => PolicyOverrideValue::Unset,
-                            frostr_utils::BfPolicyOverrideValue::Allow => PolicyOverrideValue::Allow,
+                            frostr_utils::BfPolicyOverrideValue::Unset => {
+                                PolicyOverrideValue::Unset
+                            }
+                            frostr_utils::BfPolicyOverrideValue::Allow => {
+                                PolicyOverrideValue::Allow
+                            }
                             frostr_utils::BfPolicyOverrideValue::Deny => PolicyOverrideValue::Deny,
                         },
                     },
                     respond: bifrost_core::types::MethodPolicyOverride {
                         echo: match policy.policy.respond.echo {
-                            frostr_utils::BfPolicyOverrideValue::Unset => PolicyOverrideValue::Unset,
-                            frostr_utils::BfPolicyOverrideValue::Allow => PolicyOverrideValue::Allow,
+                            frostr_utils::BfPolicyOverrideValue::Unset => {
+                                PolicyOverrideValue::Unset
+                            }
+                            frostr_utils::BfPolicyOverrideValue::Allow => {
+                                PolicyOverrideValue::Allow
+                            }
                             frostr_utils::BfPolicyOverrideValue::Deny => PolicyOverrideValue::Deny,
                         },
                         ping: match policy.policy.respond.ping {
-                            frostr_utils::BfPolicyOverrideValue::Unset => PolicyOverrideValue::Unset,
-                            frostr_utils::BfPolicyOverrideValue::Allow => PolicyOverrideValue::Allow,
+                            frostr_utils::BfPolicyOverrideValue::Unset => {
+                                PolicyOverrideValue::Unset
+                            }
+                            frostr_utils::BfPolicyOverrideValue::Allow => {
+                                PolicyOverrideValue::Allow
+                            }
                             frostr_utils::BfPolicyOverrideValue::Deny => PolicyOverrideValue::Deny,
                         },
                         onboard: match policy.policy.respond.onboard {
-                            frostr_utils::BfPolicyOverrideValue::Unset => PolicyOverrideValue::Unset,
-                            frostr_utils::BfPolicyOverrideValue::Allow => PolicyOverrideValue::Allow,
+                            frostr_utils::BfPolicyOverrideValue::Unset => {
+                                PolicyOverrideValue::Unset
+                            }
+                            frostr_utils::BfPolicyOverrideValue::Allow => {
+                                PolicyOverrideValue::Allow
+                            }
                             frostr_utils::BfPolicyOverrideValue::Deny => PolicyOverrideValue::Deny,
                         },
                         sign: match policy.policy.respond.sign {
-                            frostr_utils::BfPolicyOverrideValue::Unset => PolicyOverrideValue::Unset,
-                            frostr_utils::BfPolicyOverrideValue::Allow => PolicyOverrideValue::Allow,
+                            frostr_utils::BfPolicyOverrideValue::Unset => {
+                                PolicyOverrideValue::Unset
+                            }
+                            frostr_utils::BfPolicyOverrideValue::Allow => {
+                                PolicyOverrideValue::Allow
+                            }
                             frostr_utils::BfPolicyOverrideValue::Deny => PolicyOverrideValue::Deny,
                         },
                         ecdh: match policy.policy.respond.ecdh {
-                            frostr_utils::BfPolicyOverrideValue::Unset => PolicyOverrideValue::Unset,
-                            frostr_utils::BfPolicyOverrideValue::Allow => PolicyOverrideValue::Allow,
+                            frostr_utils::BfPolicyOverrideValue::Unset => {
+                                PolicyOverrideValue::Unset
+                            }
+                            frostr_utils::BfPolicyOverrideValue::Allow => {
+                                PolicyOverrideValue::Allow
+                            }
                             frostr_utils::BfPolicyOverrideValue::Deny => PolicyOverrideValue::Deny,
                         },
                     },
@@ -2018,7 +2217,7 @@ fn resolve_profile_runtime_with_passphrase(
     let share = parse_share_package(&share_raw).context("parse profile share package")?;
     let (peers, manual_policy_overrides) =
         resolve_profile_peers_and_overrides(&group, &share, profile.policy_overrides.clone())
-        .context("resolve peer policy overrides")?;
+            .context("resolve peer policy overrides")?;
     let remote_policy_observations =
         parse_remote_policy_observations_doc(profile.remote_policy_observations.clone())
             .context("resolve remote policy observations")?;
@@ -2048,12 +2247,10 @@ async fn publish_nostr_event(relays: &[String], event: &Event) -> Result<()> {
     let mut published = false;
     for relay in relays {
         let attempt = async {
-            let (mut stream, _) = timeout(
-                TokioDuration::from_secs(3),
-                connect_async(relay.as_str()),
-            )
-            .await
-            .map_err(|_| anyhow!("timed out connecting to relay"))??;
+            let (mut stream, _) =
+                timeout(TokioDuration::from_secs(3), connect_async(relay.as_str()))
+                    .await
+                    .map_err(|_| anyhow!("timed out connecting to relay"))??;
             stream.send(Message::Text(payload.clone().into())).await?;
             while let Some(message) = timeout(TokioDuration::from_secs(3), stream.next())
                 .await
@@ -2061,7 +2258,8 @@ async fn publish_nostr_event(relays: &[String], event: &Event) -> Result<()> {
             {
                 let message = message?;
                 if let Message::Text(text) = message {
-                    let value: Value = serde_json::from_str(&text).context("parse relay response")?;
+                    let value: Value =
+                        serde_json::from_str(&text).context("parse relay response")?;
                     if let Some(array) = value.as_array() {
                         match array.first().and_then(Value::as_str) {
                             Some("OK") => {
@@ -2121,7 +2319,11 @@ async fn probe_relays(relays: &[String]) -> Vec<RelayProbeResult> {
     results
 }
 
-async fn fetch_latest_nostr_event(relays: &[String], author_pubkey: &str, kind: u16) -> Result<Event> {
+async fn fetch_latest_nostr_event(
+    relays: &[String],
+    author_pubkey: &str,
+    kind: u16,
+) -> Result<Event> {
     let subscription_id = format!("igloo-shell-{}", now_unix_secs());
     let filter = serde_json::json!({
         "authors": [author_pubkey],
@@ -2134,7 +2336,9 @@ async fn fetch_latest_nostr_event(relays: &[String], author_pubkey: &str, kind: 
         let attempt = async {
             let (mut stream, _) = connect_async(relay.as_str()).await?;
             stream.send(Message::Text(request.clone().into())).await?;
-            while let Some(message) = tokio::time::timeout(Duration::from_secs(3), stream.next()).await? {
+            while let Some(message) =
+                tokio::time::timeout(Duration::from_secs(3), stream.next()).await?
+            {
                 let message = message?;
                 if let Message::Text(text) = message {
                     let value: Value = serde_json::from_str(&text).context("parse relay event")?;
@@ -2337,9 +2541,10 @@ fn store_group_package(
     paths: &ShellPaths,
     group: &bifrost_core::types::GroupPackage,
 ) -> Result<String> {
+    let group_id = get_group_id(group).context("derive group id")?;
     let path = paths
         .groups_dir
-        .join(format!("{}.json", hex::encode(group.group_pk)));
+        .join(format!("{}.json", hex::encode(group_id)));
     if !path.exists() {
         write_json(&path, &GroupPackageWire::from(group.clone()))?;
     }
@@ -2397,8 +2602,9 @@ fn parse_remote_policy_observations_doc(
     for observation in observations {
         remote_policy_observations.insert(
             observation.pubkey.clone(),
-            bf_peer_scoped_policy_profile_to_core(&observation.profile)
-                .with_context(|| format!("parse remote policy observation {}", observation.pubkey))?,
+            bf_peer_scoped_policy_profile_to_core(&observation.profile).with_context(|| {
+                format!("parse remote policy observation {}", observation.pubkey)
+            })?,
         );
     }
     Ok(remote_policy_observations)
@@ -2978,8 +3184,13 @@ mod tests {
         .expect("create keyset");
         let group_path = paths.data_dir.join("group.json");
         let share_path = paths.data_dir.join("share.json");
-        write_json(&group_path, &GroupPackageWire::from(bundle.group.clone())).expect("write group");
-        write_json(&share_path, &SharePackageWire::from(bundle.shares[0].clone())).expect("write share");
+        write_json(&group_path, &GroupPackageWire::from(bundle.group.clone()))
+            .expect("write group");
+        write_json(
+            &share_path,
+            &SharePackageWire::from(bundle.shares[0].clone()),
+        )
+        .expect("write share");
 
         let import = import_profile_from_files(
             &paths,
@@ -3026,5 +3237,4 @@ mod tests {
         )
         .expect("unlock imported bfprofile");
     }
-
 }

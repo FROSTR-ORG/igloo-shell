@@ -13,7 +13,7 @@ cargo test --workspace --offline
 PR-gated Rust coverage now includes:
 
 - public CLI `onboard` integration coverage for interactive-resolution logic, `--onboard-secret`, `--onboard-secret-file`, `--vault-secret`, `--vault-secret-file`, and inline package flows
-- public CLI handoff coverage for the `profile load` flow routing and post-import `next.load` output
+- public CLI coverage for `profile load` routing, daemon-start flags, and post-import/recover/onboard/keygen next-command output
 - managed runtime integration coverage for ping, peer onboarding, signing, ECDH, and invite lifecycle
 - live policy command coverage for manifest persistence and daemon-backed runtime updates
 - deterministic TUI coverage for the logged-in session shell, session logout semantics, policy row resolution, and relay parsing/secret-confirmation behavior

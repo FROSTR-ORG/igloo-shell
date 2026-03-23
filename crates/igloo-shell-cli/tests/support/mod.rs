@@ -302,7 +302,9 @@ impl TestHarness {
         share_name: &str,
         password: &str,
     ) -> String {
-        let out_path = self.root.join(format!("{profile_id}-{share_name}.bfonboard"));
+        let out_path = self
+            .root
+            .join(format!("{profile_id}-{share_name}.bfonboard"));
         self.run_with_env(
             &[
                 "export",
@@ -323,6 +325,30 @@ impl TestHarness {
         );
         fs::read_to_string(&out_path)
             .expect("read bfonboard export")
+            .trim()
+            .to_string()
+    }
+
+    pub fn export_bfshare_package(&self, profile_id: &str, password: &str) -> String {
+        let out_path = self.root.join(format!("{profile_id}.bfshare"));
+        self.run_with_env(
+            &[
+                "export",
+                profile_id,
+                "--format",
+                "bfshare",
+                "--out",
+                path_arg(&out_path),
+                "--package-password-env",
+                "IGLOO_SHELL_PACKAGE_PASSWORD",
+            ],
+            &[
+                ("IGLOO_SHELL_PACKAGE_PASSWORD", password),
+                ("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase"),
+            ],
+        );
+        fs::read_to_string(&out_path)
+            .expect("read bfshare export")
             .trim()
             .to_string()
     }
@@ -373,14 +399,8 @@ impl TestHarness {
         while start.elapsed() < timeout {
             let sign = self.run_check(profile_id, "sign");
             let ecdh = self.run_check(profile_id, "ecdh");
-            let sign_ready = sign
-                .get("ready")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let ecdh_ready = ecdh
-                .get("ready")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
+            let sign_ready = sign.get("ready").and_then(Value::as_bool).unwrap_or(false);
+            let ecdh_ready = ecdh.get("ready").and_then(Value::as_bool).unwrap_or(false);
             if sign_ready && ecdh_ready {
                 return;
             }

@@ -261,13 +261,17 @@ Commands:
 - `profile load`
 - `profile load <profile-id>`
 - `profile load [<profile-id>] [--vault-secret <value> | --vault-secret-file <path>]`
+- `profile load [<profile-id>] --start`
+- `profile load [<profile-id>] --daemon`
 
 Rules:
 
-- `profile load` is the canonical way to enter the logged-in shell
+- `profile load` is the canonical way to unlock a managed profile from the CLI
 - without a profile id, `profile load` presents a CLI profile picker
 - `profile load` prompts for the vault secret when no explicit secret source is provided
-- a successful `profile load` launches the logged-in shell directly
+- default `profile load` validates vault unlock, prints status and next commands, and exits
+- `--start` starts the daemon and attaches to daemon log output
+- `--daemon` starts the daemon in the background and exits after printing status
 
 ### 6.2b `import`
 
@@ -276,12 +280,16 @@ Commands:
 - `import <bfprofile-or-path> [--label <label>]`
 - `import <bfprofile-or-path> --package-secret <value> --vault-secret <value> [--label <label>]`
 - `import <bfprofile-or-path> --package-secret-file <path> --vault-secret-file <path> [--label <label>]`
+- `import <bfprofile-or-path> ... --start`
+- `import <bfprofile-or-path> ... --daemon`
 
 Rules:
 
 - import converts an encrypted `bfprofile` payload into a managed shell profile
 - `import` prompts for any missing label or secret inputs on a TTY
-- a successful import launches the logged-in shell unless `--json` is supplied
+- a successful import prints the resulting profile and next commands unless `--json` is supplied
+- `--start` starts the resulting profile and attaches to daemon log output
+- `--daemon` starts the resulting profile in the background after import completes
 
 ### 6.2c `recover`
 
@@ -290,12 +298,16 @@ Commands:
 - `recover <bfshare-or-path> [--label <label>]`
 - `recover <bfshare-or-path> --package-secret <value> --vault-secret <value> [--label <label>]`
 - `recover <bfshare-or-path> --package-secret-file <path> --vault-secret-file <path> [--label <label>]`
+- `recover <bfshare-or-path> ... --start`
+- `recover <bfshare-or-path> ... --daemon`
 
 Rules:
 
 - recover resolves a `bfshare` payload into a managed profile using the latest published backup
 - `recover` prompts for any missing label or secret inputs on a TTY
-- a successful recovery launches the logged-in shell unless `--json` is supplied
+- a successful recovery prints the resulting profile and next commands unless `--json` is supplied
+- `--start` starts the resulting profile and attaches to daemon log output
+- `--daemon` starts the resulting profile in the background after recovery completes
 
 ### 6.2d `export`
 
@@ -315,6 +327,8 @@ Commands:
 - `onboard <package-or-path> [--label <label>]`
 - `onboard <package-or-path> --onboard-secret <value> --vault-secret <value> [--label <label>]`
 - `onboard <package-or-path> --onboard-secret-file <path> --vault-secret-file <path> [--label <label>]`
+- `onboard <package-or-path> ... --start`
+- `onboard <package-or-path> ... --daemon`
 - `onboard <package-or-path> ... --json`
 
 Rules:
@@ -327,7 +341,9 @@ Rules:
 - vault-secret interactive entry requires a confirmation prompt
 - exactly one explicit onboarding-secret source may be supplied: `--onboard-secret` or `--onboard-secret-file`
 - exactly one explicit vault-secret source may be supplied: `--vault-secret` or `--vault-secret-file`
-- a successful onboard creates a managed profile and launches the logged-in shell for that profile by default, reusing the entered vault secret for that session
+- a successful onboard creates a managed profile and prints the next commands by default
+- `--start` starts the resulting profile and attaches to daemon log output
+- `--daemon` starts the resulting profile in the background after onboarding completes
 - `--json` keeps the command in automation/json mode
 
 ### 6.2f `keygen`
@@ -341,7 +357,7 @@ Rules:
 
 - keyset generation is launched from the CLI, not from the TUI
 - the CLI collects the local member selection, vault secret, and onboarding-package distribution secret
-- a successful keygen creates the local managed profile, writes onboarding packages for the remaining shares, and launches the logged-in shell unless `--json` is supplied
+- a successful keygen creates the local managed profile, writes onboarding packages for the remaining shares, and prints the next commands unless `--json` is supplied
 
 ### 6.3 `daemon`
 

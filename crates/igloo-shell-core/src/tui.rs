@@ -25,15 +25,16 @@ use ratatui::widgets::{
 use serde::Deserialize;
 
 use crate::shell::{
-    ConnectedOnboardingImport, GeneratedKeysetDraft, ProfileImportResult, ProfileManifest,
-    ProfilePreview, ShellPaths, connect_onboarding_package_preview,
-    create_generated_keyset_draft, daemon_log_path, daemon_runtime_query,
-    export_generated_onboarding_package, finalize_connected_onboarding_import,
-    import_generated_share, import_profile_from_bfprofile_payload, list_profiles, now_unix_secs,
-    preview_bfprofile_value, preview_bfshare_recovery, read_daemon_metadata, read_profile,
+    ConnectedOnboardingImport, GeneratedKeysetDraft, PolicyDirection, PolicyMethod,
+    ProfileImportResult, ProfileManifest, ProfilePreview, ShellPaths,
+    connect_onboarding_package_preview, create_generated_keyset_draft, daemon_log_path,
+    daemon_runtime_query, export_generated_onboarding_package,
+    finalize_connected_onboarding_import, import_generated_share,
+    import_profile_from_bfprofile_payload, list_profiles, now_unix_secs, preview_bfprofile_value,
+    preview_bfshare_recovery, read_daemon_metadata, read_profile,
     set_profile_default_policy_override, set_profile_peer_policy_override,
     start_profile_daemon_with_passphrase, stop_profile_daemon,
-    validate_profile_unlock_with_passphrase, PolicyDirection, PolicyMethod,
+    validate_profile_unlock_with_passphrase,
 };
 
 const LOG_TAIL_LINES: usize = 16;
@@ -119,10 +120,18 @@ impl HomeAction {
 
     fn description(self) -> &'static str {
         match self {
-            HomeAction::OnboardPackage => "Connect a password-protected bfonboard package and save this device.",
-            HomeAction::ImportExisting => "Import a bfprofile package from pasted text or a local path.",
-            HomeAction::RecoverShare => "Recover a device from a bfshare package and the published backup.",
-            HomeAction::GenerateKeyset => "Create a fresh keyset, save this local device, and export onboarding packages for the remaining shares.",
+            HomeAction::OnboardPackage => {
+                "Connect a password-protected bfonboard package and save this device."
+            }
+            HomeAction::ImportExisting => {
+                "Import a bfprofile package from pasted text or a local path."
+            }
+            HomeAction::RecoverShare => {
+                "Recover a device from a bfshare package and the published backup."
+            }
+            HomeAction::GenerateKeyset => {
+                "Create a fresh keyset, save this local device, and export onboarding packages for the remaining shares."
+            }
         }
     }
 }
@@ -1349,7 +1358,10 @@ async fn prepare_initial_state(paths: &ShellPaths, app: &mut App) -> Result<()> 
     }
 
     if let Some(profile_id) = &app.preferred_profile_id
-        && let Some(position) = app.profiles.iter().position(|profile| &profile.id == profile_id)
+        && let Some(position) = app
+            .profiles
+            .iter()
+            .position(|profile| &profile.id == profile_id)
     {
         app.profile_cursor = position;
         open_input_modal(
@@ -1526,7 +1538,8 @@ async fn save_imported_profile(paths: &ShellPaths, app: &mut App) -> Result<()> 
 async fn connect_bfshare_recovery(app: &mut App) -> Result<()> {
     let package = resolve_text_or_path(&app.recover_connect.package_input)?;
     let (preview, payload) =
-        preview_bfshare_recovery(&package, app.recover_connect.package_secret.clone(), None).await?;
+        preview_bfshare_recovery(&package, app.recover_connect.package_secret.clone(), None)
+            .await?;
     app.recover_save.preview = Some(preview.clone());
     app.recover_save.payload = Some(payload);
     app.recover_save.label = preview.label.clone();
@@ -1706,7 +1719,8 @@ async fn cycle_selected_policy(paths: &ShellPaths, app: &mut App) -> Result<()> 
         );
     } else {
         let peers = policy_rows(app);
-        let Some((pubkey, current, _)) = peers.get(app.row_cursor.saturating_sub(1)).cloned() else {
+        let Some((pubkey, current, _)) = peers.get(app.row_cursor.saturating_sub(1)).cloned()
+        else {
             return Ok(());
         };
         let next = next_policy_value(policy_value(&current, field));
@@ -1895,7 +1909,11 @@ async fn clear_selected_policy(paths: &ShellPaths, app: &mut App) -> Result<()> 
         )
         .await?;
     }
-    app.status_line = format!("Cleared {} override for {}.", field.short_label(), shorten(&pubkey));
+    app.status_line = format!(
+        "Cleared {} override for {}.",
+        field.short_label(),
+        shorten(&pubkey)
+    );
     refresh(paths, app).await
 }
 
@@ -2007,8 +2025,8 @@ fn render_logged_out_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &Ap
         | LoggedOutView::GenerateProfile
         | LoggedOutView::GenerateDistribute => "igloo-shell :: Generate Keyset",
     };
-    let widget = Paragraph::new(title)
-        .block(Block::default().title("Logged Out").borders(Borders::ALL));
+    let widget =
+        Paragraph::new(title).block(Block::default().title("Logged Out").borders(Borders::ALL));
     frame.render_widget(widget, area);
 }
 
@@ -2091,7 +2109,10 @@ fn render_home(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             .collect()
     };
     let profiles = List::new(profile_items)
-        .block(focus_block("Profiles", app.focus_region == FocusRegion::Content))
+        .block(focus_block(
+            "Profiles",
+            app.focus_region == FocusRegion::Content,
+        ))
         .highlight_style(
             Style::default()
                 .bg(Color::Blue)
@@ -2113,7 +2134,10 @@ fn render_home(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             short_profile_id(&profile.id),
             profile.id
         )));
-        detail_lines.push(Line::from(format!("Relay profile: {}", profile.relay_profile)));
+        detail_lines.push(Line::from(format!(
+            "Relay profile: {}",
+            profile.relay_profile
+        )));
         detail_lines.push(Line::from(format!("Created: {}", profile.created_at)));
         detail_lines.push(Line::from(format!(
             "Status: {}",
@@ -2138,7 +2162,10 @@ fn render_home(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         .map(|action| ListItem::new(action.title()))
         .collect::<Vec<_>>();
     let action_list = List::new(actions)
-        .block(focus_block("Onboarding Paths", app.focus_region == FocusRegion::Actions))
+        .block(focus_block(
+            "Onboarding Paths",
+            app.focus_region == FocusRegion::Actions,
+        ))
         .highlight_style(
             Style::default()
                 .bg(Color::Blue)
@@ -2186,9 +2213,18 @@ fn render_onboard_connect(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App)
         "Connect With bfonboard",
         "Step 1 of 2. Paste a bfonboard package or provide a local file path, then enter the onboarding secret to complete the handshake.",
         vec![
-            form_row("Package", display_value(&app.onboard_connect.package_input, false)),
-            form_row("Onboarding secret", display_value(&app.onboard_connect.onboarding_secret, true)),
-            action_row("Connect", "Complete the onboarding handshake and preview the resulting device."),
+            form_row(
+                "Package",
+                display_value(&app.onboard_connect.package_input, false),
+            ),
+            form_row(
+                "Onboarding secret",
+                display_value(&app.onboard_connect.onboarding_secret, true),
+            ),
+            action_row(
+                "Connect",
+                "Complete the onboarding handshake and preview the resulting device.",
+            ),
             action_row("Back", "Return to Home."),
         ],
         app.row_cursor,
@@ -2196,12 +2232,28 @@ fn render_onboard_connect(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App)
 }
 
 fn render_onboard_save(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
-    let preview = app.onboard_save.connection.as_ref().map(|entry| &entry.preview);
+    let preview = app
+        .onboard_save
+        .connection
+        .as_ref()
+        .map(|entry| &entry.preview);
     let mut rows = vec![
-        form_row("Profile name", display_value(&app.onboard_save.label, false)),
-        form_row("Vault secret", display_value(&app.onboard_save.vault_secret, true)),
-        form_row("Confirm secret", display_value(&app.onboard_save.vault_confirm, true)),
-        action_row("Save profile", "Import this device locally, start the daemon, and enter the dashboard."),
+        form_row(
+            "Profile name",
+            display_value(&app.onboard_save.label, false),
+        ),
+        form_row(
+            "Vault secret",
+            display_value(&app.onboard_save.vault_secret, true),
+        ),
+        form_row(
+            "Confirm secret",
+            display_value(&app.onboard_save.vault_confirm, true),
+        ),
+        action_row(
+            "Save profile",
+            "Import this device locally, start the daemon, and enter the dashboard.",
+        ),
         action_row("Back", "Return to the onboarding connect step."),
     ];
     if let Some(preview) = preview {
@@ -2236,9 +2288,18 @@ fn render_import_connect(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) 
         "Import bfprofile",
         "Paste a bfprofile package or provide a local file path, then enter the package secret to preview the profile.",
         vec![
-            form_row("bfprofile", display_value(&app.import_connect.package_input, false)),
-            form_row("Package secret", display_value(&app.import_connect.package_secret, true)),
-            action_row("Load preview", "Decode the profile package and review its details."),
+            form_row(
+                "bfprofile",
+                display_value(&app.import_connect.package_input, false),
+            ),
+            form_row(
+                "Package secret",
+                display_value(&app.import_connect.package_secret, true),
+            ),
+            action_row(
+                "Load preview",
+                "Decode the profile package and review its details.",
+            ),
             action_row("Back", "Return to Home."),
         ],
         app.row_cursor,
@@ -2262,9 +2323,18 @@ fn render_import_save(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     }
     rows.extend([
         form_row("Profile name", display_value(&app.import_save.label, false)),
-        form_row("Vault secret", display_value(&app.import_save.vault_secret, true)),
-        form_row("Confirm secret", display_value(&app.import_save.vault_confirm, true)),
-        action_row("Import profile", "Save the imported profile locally, start the daemon, and enter the dashboard."),
+        form_row(
+            "Vault secret",
+            display_value(&app.import_save.vault_secret, true),
+        ),
+        form_row(
+            "Confirm secret",
+            display_value(&app.import_save.vault_confirm, true),
+        ),
+        action_row(
+            "Import profile",
+            "Save the imported profile locally, start the daemon, and enter the dashboard.",
+        ),
         action_row("Back", "Return to the import step."),
     ]);
     render_form_rows(
@@ -2284,9 +2354,18 @@ fn render_recover_connect(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App)
         "Recover From bfshare",
         "Paste a bfshare package or provide a local file path, then enter the share secret to resolve the published backup and preview this device.",
         vec![
-            form_row("bfshare", display_value(&app.recover_connect.package_input, false)),
-            form_row("Share secret", display_value(&app.recover_connect.package_secret, true)),
-            action_row("Load preview", "Resolve the backup and review the recovered profile."),
+            form_row(
+                "bfshare",
+                display_value(&app.recover_connect.package_input, false),
+            ),
+            form_row(
+                "Share secret",
+                display_value(&app.recover_connect.package_secret, true),
+            ),
+            action_row(
+                "Load preview",
+                "Resolve the backup and review the recovered profile.",
+            ),
             action_row("Back", "Return to Home."),
         ],
         app.row_cursor,
@@ -2309,10 +2388,22 @@ fn render_recover_save(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         ));
     }
     rows.extend([
-        form_row("Profile name", display_value(&app.recover_save.label, false)),
-        form_row("Vault secret", display_value(&app.recover_save.vault_secret, true)),
-        form_row("Confirm secret", display_value(&app.recover_save.vault_confirm, true)),
-        action_row("Recover profile", "Save the recovered profile locally, start the daemon, and enter the dashboard."),
+        form_row(
+            "Profile name",
+            display_value(&app.recover_save.label, false),
+        ),
+        form_row(
+            "Vault secret",
+            display_value(&app.recover_save.vault_secret, true),
+        ),
+        form_row(
+            "Confirm secret",
+            display_value(&app.recover_save.vault_confirm, true),
+        ),
+        action_row(
+            "Recover profile",
+            "Save the recovered profile locally, start the daemon, and enter the dashboard.",
+        ),
         action_row("Back", "Return to the recovery step."),
     ]);
     render_form_rows(
@@ -2332,10 +2423,22 @@ fn render_generate_config(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App)
         "Generate Keyset",
         "Step 1 of 3. Create the keyset that will be split across devices.",
         vec![
-            form_row("Keyset name", display_value(&app.generate_config.keyset_name, false)),
-            form_row("Threshold", display_value(&app.generate_config.threshold, false)),
-            form_row("Member count", display_value(&app.generate_config.count, false)),
-            action_row("Generate", "Create the keyset and move to local device setup."),
+            form_row(
+                "Keyset name",
+                display_value(&app.generate_config.keyset_name, false),
+            ),
+            form_row(
+                "Threshold",
+                display_value(&app.generate_config.threshold, false),
+            ),
+            form_row(
+                "Member count",
+                display_value(&app.generate_config.count, false),
+            ),
+            action_row(
+                "Generate",
+                "Create the keyset and move to local device setup.",
+            ),
             action_row("Back", "Return to Home."),
         ],
         app.row_cursor,
@@ -2367,7 +2470,10 @@ fn render_generate_profile(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App
                 "Onboarding secret",
                 display_value(&state.distribution_secret, true),
             ),
-            action_row("Save local profile", "Import the selected share locally and export onboarding packages for the remaining shares."),
+            action_row(
+                "Save local profile",
+                "Import the selected share locally and export onboarding packages for the remaining shares.",
+            ),
             action_row("Back", "Return to the keyset configuration step."),
         ],
         app.row_cursor,
@@ -2425,7 +2531,13 @@ fn render_generate_distribute(frame: &mut ratatui::Frame<'_>, area: Rect, app: &
 fn render_dashboard(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     let text = if let Some(snapshot) = &app.snapshot {
         let mut lines = vec![
-            Line::from(format!("Profile: {}", app.active_profile.as_ref().map(|profile| profile.label.as_str()).unwrap_or("-"))),
+            Line::from(format!(
+                "Profile: {}",
+                app.active_profile
+                    .as_ref()
+                    .map(|profile| profile.label.as_str())
+                    .unwrap_or("-")
+            )),
             Line::from(format!("Daemon running: {}", yes_no(app.daemon_running))),
             Line::from(format!(
                 "Share pk: {}  Group pk: {}",
@@ -2456,20 +2568,33 @@ fn render_dashboard(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         if snapshot.runtime.pending_operations.is_empty() {
             lines.push(Line::from("  none"));
         } else {
-            lines.extend(snapshot.runtime.pending_operations.iter().take(8).map(|op| {
-                Line::from(format!(
-                    "  {} {} peers={} threshold={}",
-                    op.op_type,
-                    shorten(&op.request_id),
-                    op.target_peers.len(),
-                    op.threshold
-                ))
-            }));
+            lines.extend(
+                snapshot
+                    .runtime
+                    .pending_operations
+                    .iter()
+                    .take(8)
+                    .map(|op| {
+                        Line::from(format!(
+                            "  {} {} peers={} threshold={}",
+                            op.op_type,
+                            shorten(&op.request_id),
+                            op.target_peers.len(),
+                            op.threshold
+                        ))
+                    }),
+            );
         }
         Text::from(lines)
     } else if app.active_profile.is_some() {
         Text::from(vec![
-            Line::from(format!("Profile: {}", app.active_profile.as_ref().map(|profile| profile.label.as_str()).unwrap_or("-"))),
+            Line::from(format!(
+                "Profile: {}",
+                app.active_profile
+                    .as_ref()
+                    .map(|profile| profile.label.as_str())
+                    .unwrap_or("-")
+            )),
             Line::from(format!("Daemon running: {}", yes_no(app.daemon_running))),
             Line::from("No live runtime snapshot is available yet."),
             Line::from("Use Settings to refresh or start the daemon."),
@@ -2481,7 +2606,10 @@ fn render_dashboard(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         ])
     };
     let widget = Paragraph::new(text)
-        .block(focus_block("Dashboard", app.focus_region == FocusRegion::Content))
+        .block(focus_block(
+            "Dashboard",
+            app.focus_region == FocusRegion::Content,
+        ))
         .wrap(Wrap { trim: true });
     frame.render_widget(widget, area);
 }
@@ -2507,34 +2635,88 @@ fn render_permissions(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         Cell::from("default"),
         Cell::from("default policy"),
         Cell::from("-"),
-        Cell::from(policy_value_label(policy_value(&default_policy, PolicyField::RequestPing))),
-        Cell::from(policy_value_label(policy_value(&default_policy, PolicyField::RequestOnboard))),
-        Cell::from(policy_value_label(policy_value(&default_policy, PolicyField::RequestSign))),
-        Cell::from(policy_value_label(policy_value(&default_policy, PolicyField::RequestEcdh))),
-        Cell::from(policy_value_label(policy_value(&default_policy, PolicyField::RespondPing))),
-        Cell::from(policy_value_label(policy_value(&default_policy, PolicyField::RespondOnboard))),
-        Cell::from(policy_value_label(policy_value(&default_policy, PolicyField::RespondSign))),
-        Cell::from(policy_value_label(policy_value(&default_policy, PolicyField::RespondEcdh))),
+        Cell::from(policy_value_label(policy_value(
+            &default_policy,
+            PolicyField::RequestPing,
+        ))),
+        Cell::from(policy_value_label(policy_value(
+            &default_policy,
+            PolicyField::RequestOnboard,
+        ))),
+        Cell::from(policy_value_label(policy_value(
+            &default_policy,
+            PolicyField::RequestSign,
+        ))),
+        Cell::from(policy_value_label(policy_value(
+            &default_policy,
+            PolicyField::RequestEcdh,
+        ))),
+        Cell::from(policy_value_label(policy_value(
+            &default_policy,
+            PolicyField::RespondPing,
+        ))),
+        Cell::from(policy_value_label(policy_value(
+            &default_policy,
+            PolicyField::RespondOnboard,
+        ))),
+        Cell::from(policy_value_label(policy_value(
+            &default_policy,
+            PolicyField::RespondSign,
+        ))),
+        Cell::from(policy_value_label(policy_value(
+            &default_policy,
+            PolicyField::RespondEcdh,
+        ))),
     ]));
     for (pubkey, policy, is_override) in policy_rows(app) {
         let online = app
             .snapshot
             .as_ref()
-            .and_then(|snapshot| snapshot.runtime.peers.iter().find(|peer| peer.pubkey == pubkey))
+            .and_then(|snapshot| {
+                snapshot
+                    .runtime
+                    .peers
+                    .iter()
+                    .find(|peer| peer.pubkey == pubkey)
+            })
             .map(|peer| yes_no(peer.online).to_string())
             .unwrap_or_else(|| "-".to_string());
         rows.push(Row::new(vec![
             Cell::from(if is_override { "override" } else { "default" }),
             Cell::from(shorten(&pubkey)),
             Cell::from(online),
-            Cell::from(policy_value_label(policy_value(&policy, PolicyField::RequestPing))),
-            Cell::from(policy_value_label(policy_value(&policy, PolicyField::RequestOnboard))),
-            Cell::from(policy_value_label(policy_value(&policy, PolicyField::RequestSign))),
-            Cell::from(policy_value_label(policy_value(&policy, PolicyField::RequestEcdh))),
-            Cell::from(policy_value_label(policy_value(&policy, PolicyField::RespondPing))),
-            Cell::from(policy_value_label(policy_value(&policy, PolicyField::RespondOnboard))),
-            Cell::from(policy_value_label(policy_value(&policy, PolicyField::RespondSign))),
-            Cell::from(policy_value_label(policy_value(&policy, PolicyField::RespondEcdh))),
+            Cell::from(policy_value_label(policy_value(
+                &policy,
+                PolicyField::RequestPing,
+            ))),
+            Cell::from(policy_value_label(policy_value(
+                &policy,
+                PolicyField::RequestOnboard,
+            ))),
+            Cell::from(policy_value_label(policy_value(
+                &policy,
+                PolicyField::RequestSign,
+            ))),
+            Cell::from(policy_value_label(policy_value(
+                &policy,
+                PolicyField::RequestEcdh,
+            ))),
+            Cell::from(policy_value_label(policy_value(
+                &policy,
+                PolicyField::RespondPing,
+            ))),
+            Cell::from(policy_value_label(policy_value(
+                &policy,
+                PolicyField::RespondOnboard,
+            ))),
+            Cell::from(policy_value_label(policy_value(
+                &policy,
+                PolicyField::RespondSign,
+            ))),
+            Cell::from(policy_value_label(policy_value(
+                &policy,
+                PolicyField::RespondEcdh,
+            ))),
         ]));
     }
     let table = Table::new(
@@ -2555,17 +2737,8 @@ fn render_permissions(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     )
     .header(
         Row::new(vec![
-            "source",
-            "peer",
-            "online",
-            "rq.ping",
-            "rq.onbd",
-            "rq.sign",
-            "rq.ecdh",
-            "rs.ping",
-            "rs.onbd",
-            "rs.sign",
-            "rs.ecdh",
+            "source", "peer", "online", "rq.ping", "rq.onbd", "rq.sign", "rq.ecdh", "rs.ping",
+            "rs.onbd", "rs.sign", "rs.ecdh",
         ])
         .style(Style::default().fg(Color::Yellow)),
     )
@@ -2582,14 +2755,19 @@ fn render_permissions(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         .iter()
         .map(|action| {
             let label = match action {
-                PermissionsAction::NextField => format!("{} ({})", action.title(), selected_field.short_label()),
+                PermissionsAction::NextField => {
+                    format!("{} ({})", action.title(), selected_field.short_label())
+                }
                 _ => action.title().to_string(),
             };
             ListItem::new(label)
         })
         .collect::<Vec<_>>();
     let list = List::new(actions)
-        .block(focus_block("Actions", app.focus_region == FocusRegion::Actions))
+        .block(focus_block(
+            "Actions",
+            app.focus_region == FocusRegion::Actions,
+        ))
         .highlight_style(
             Style::default()
                 .bg(Color::Blue)
@@ -2649,21 +2827,39 @@ fn render_permissions(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
                 detail
                     .remote_observation
                     .as_ref()
-                    .map(|remote| format!("Remote rq.ping/rs.ping: {}/{}", yes_no(remote.request.ping), yes_no(remote.respond.ping)))
+                    .map(|remote| {
+                        format!(
+                            "Remote rq.ping/rs.ping: {}/{}",
+                            yes_no(remote.request.ping),
+                            yes_no(remote.respond.ping)
+                        )
+                    })
                     .unwrap_or_else(|| "Remote rq.ping/rs.ping: -/-".to_string()),
             ),
             Line::from(
                 detail
                     .remote_observation
                     .as_ref()
-                    .map(|remote| format!("Remote rq.onbd/rs.onbd: {}/{}", yes_no(remote.request.onboard), yes_no(remote.respond.onboard)))
+                    .map(|remote| {
+                        format!(
+                            "Remote rq.onbd/rs.onbd: {}/{}",
+                            yes_no(remote.request.onboard),
+                            yes_no(remote.respond.onboard)
+                        )
+                    })
                     .unwrap_or_else(|| "Remote rq.onbd/rs.onbd: -/-".to_string()),
             ),
             Line::from(
                 detail
                     .remote_observation
                     .as_ref()
-                    .map(|remote| format!("Remote rs.sign/rs.ecdh: {}/{}", yes_no(remote.respond.sign), yes_no(remote.respond.ecdh)))
+                    .map(|remote| {
+                        format!(
+                            "Remote rs.sign/rs.ecdh: {}/{}",
+                            yes_no(remote.respond.sign),
+                            yes_no(remote.respond.ecdh)
+                        )
+                    })
                     .unwrap_or_else(|| "Remote rs.sign/rs.ecdh: -/-".to_string()),
             ),
         ],
@@ -2674,7 +2870,11 @@ fn render_permissions(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         ],
     };
     let detail_widget = Paragraph::new(Text::from(detail_lines))
-        .block(Block::default().title("Runtime Detail").borders(Borders::ALL))
+        .block(
+            Block::default()
+                .title("Runtime Detail")
+                .borders(Borders::ALL),
+        )
         .wrap(Wrap { trim: true });
     frame.render_widget(detail_widget, side_chunks[1]);
 }
@@ -2709,7 +2909,10 @@ fn render_settings(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         })
         .collect::<Vec<_>>();
     let list = List::new(actions)
-        .block(focus_block("Settings", app.focus_region == FocusRegion::Content))
+        .block(focus_block(
+            "Settings",
+            app.focus_region == FocusRegion::Content,
+        ))
         .highlight_style(
             Style::default()
                 .bg(Color::Blue)
@@ -2720,10 +2923,7 @@ fn render_settings(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     frame.render_stateful_widget(list, chunks[0], &mut state);
 
     let mut lines = vec![
-        Line::from(format!(
-            "Daemon running: {}",
-            yes_no(app.daemon_running)
-        )),
+        Line::from(format!("Daemon running: {}", yes_no(app.daemon_running))),
         Line::from(format!(
             "Relay profile: {}",
             app.active_profile
@@ -2744,7 +2944,11 @@ fn render_settings(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         lines.extend(
             app.log_lines
                 .iter()
-                .take(if app.logs_verbose { app.log_lines.len() } else { LOG_TAIL_LINES })
+                .take(if app.logs_verbose {
+                    app.log_lines.len()
+                } else {
+                    LOG_TAIL_LINES
+                })
                 .map(|line| Line::from(format!("  {line}"))),
         );
     }
@@ -2776,7 +2980,11 @@ fn render_input_modal(frame: &mut ratatui::Frame<'_>, area: Rect, modal: &InputM
         lines.push(Line::from(format!("Error: {error}")));
     }
     let widget = Paragraph::new(Text::from(lines))
-        .block(Block::default().title(modal.title.clone()).borders(Borders::ALL))
+        .block(
+            Block::default()
+                .title(modal.title.clone())
+                .borders(Borders::ALL),
+        )
         .wrap(Wrap { trim: true });
     frame.render_widget(widget, popup);
 }
@@ -2817,14 +3025,18 @@ fn open_input_modal(
 fn profile_id_from_import(import: &ProfileImportResult) -> Result<String> {
     match import {
         ProfileImportResult::ProfileCreated { profile, .. } => Ok(profile.id.clone()),
-        ProfileImportResult::OnboardingStaged { .. } => bail!("unexpected staged onboarding import"),
+        ProfileImportResult::OnboardingStaged { .. } => {
+            bail!("unexpected staged onboarding import")
+        }
     }
 }
 
 fn manifest_from_import(import: &ProfileImportResult) -> Result<ProfileManifest> {
     match import {
         ProfileImportResult::ProfileCreated { profile, .. } => Ok(profile.clone()),
-        ProfileImportResult::OnboardingStaged { .. } => bail!("unexpected staged onboarding import"),
+        ProfileImportResult::OnboardingStaged { .. } => {
+            bail!("unexpected staged onboarding import")
+        }
     }
 }
 
@@ -2938,7 +3150,11 @@ fn policy_rows(app: &App) -> Vec<(String, PeerPolicyOverride, bool)> {
         {
             rows.push((peer, policy, true));
         } else {
-            rows.push((peer, default_policy.clone(), runtime_has_effective_restrictions));
+            rows.push((
+                peer,
+                default_policy.clone(),
+                runtime_has_effective_restrictions,
+            ));
         }
     }
     for (peer, policy) in overrides {
@@ -2955,7 +3171,10 @@ fn selected_permission_detail(app: &App) -> Option<&PeerPermissionStateView> {
     if app.row_cursor == 0 {
         return None;
     }
-    let pubkey = policy_rows(app).get(app.row_cursor.saturating_sub(1))?.0.clone();
+    let pubkey = policy_rows(app)
+        .get(app.row_cursor.saturating_sub(1))?
+        .0
+        .clone();
     app.snapshot
         .as_ref()?
         .runtime
@@ -3098,10 +3317,16 @@ mod tests {
     #[test]
     fn home_starts_logged_out_and_selects_profiles() {
         let mut app = App::new(TuiLaunchOptions::default());
-        app.profiles = vec![sample_profile("alpha", "Alpha"), sample_profile("beta", "Beta")];
+        app.profiles = vec![
+            sample_profile("alpha", "Alpha"),
+            sample_profile("beta", "Beta"),
+        ];
         assert_eq!(app.mode, AppMode::LoggedOut);
         assert_eq!(app.logged_out_view, LoggedOutView::Home);
-        assert_eq!(selected_profile(&app).expect("selected profile").id, "alpha");
+        assert_eq!(
+            selected_profile(&app).expect("selected profile").id,
+            "alpha"
+        );
     }
 
     #[test]
@@ -3134,8 +3359,8 @@ mod tests {
 
     #[test]
     fn matching_secret_requires_confirmation() {
-        let error = ensure_matching_secret("alpha", "beta", "vault secret")
-            .expect_err("expected mismatch");
+        let error =
+            ensure_matching_secret("alpha", "beta", "vault secret").expect_err("expected mismatch");
         assert!(error.to_string().contains("confirmation"));
     }
 

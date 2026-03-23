@@ -7,6 +7,9 @@ This manual covers shell-owned operator workflows for the hard-cut V2 shell.
 ```bash
 cargo run -p igloo-shell-cli -- profile list
 cargo run -p igloo-shell-cli -- profile load
+cargo run -p igloo-shell-cli -- profile load alice --start
+cargo run -p igloo-shell-cli -- profile load alice --daemon
+cargo run -p igloo-shell-cli -- onboard ./onboard-bob.txt --label bob --onboard-secret-file ./onboard-bob.password.txt --vault-secret-file ./vault-secret.txt --start
 cargo run -p igloo-shell-cli -- profile backup alice --vault-passphrase-env IGLOO_SHELL_VAULT_PASSPHRASE
 cargo run -p igloo-shell-cli -- onboard ./onboard-bob.txt --label bob --onboard-secret-file ./onboard-bob.password.txt --vault-secret-file ./vault-secret.txt
 cargo run -p igloo-shell-cli -- import ./bob.bfprofile.txt --label bob --package-secret-file ./bob.package-secret.txt --vault-secret-file ./vault-secret.txt
@@ -18,7 +21,7 @@ cargo run -p igloo-shell-cli -- relays set demo --label Demo ws://127.0.0.1:8194
 cargo run -p igloo-shell-cli -- relays default demo
 ```
 
-The shell store and CLI-first flow model are live. `profile load`, `onboard`, `import`, `recover`, and `keygen` are the supported entry paths into the logged-in shell. `V2-SHELL-SPEC.md` is the source of truth for the broader command surface.
+The shell store and CLI-first flow model are live. `profile load`, `onboard`, `import`, `recover`, and `keygen` are the supported profile entry paths. `profile load --start` is the explicit foreground daemon/session path, and `--daemon` is the background-start convenience flag for profile-producing flows. `V2-SHELL-SPEC.md` is the source of truth for the broader command surface.
 
 ## Developer Utilities
 
@@ -57,4 +60,6 @@ scripts/ws_soak.sh --iterations 25 --out dev/audit/work/evidence/ws-soak-$(date 
 - If `--label` is omitted on a TTY, `igloo-shell onboard` prompts for the profile name first.
 - The onboarding package secret is prompted next.
 - The vault secret prompt comes after package decryption succeeds, and requires confirmation.
-- A successful interactive onboard launches the logged-in shell with the new profile already unlocked for that session.
+- A successful interactive onboard prints the created profile and next commands.
+- Add `--daemon` to onboard in order to start the new profile in the background immediately.
+- Add `--start` to onboard in order to attach to the new profile's daemon log immediately.
