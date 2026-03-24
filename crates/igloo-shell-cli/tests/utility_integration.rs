@@ -224,6 +224,52 @@ fn daemon_and_runtime_commands_cover_status_logs_restart_and_wipe_state() {
 }
 
 #[test]
+fn check_commands_fail_cleanly_after_daemon_stop() {
+    let mut harness = TestHarness::new("utility-check-offline");
+    harness.start_relay();
+    harness.keygen(2, 3);
+    harness.set_relay_profile("local");
+
+    let alice = harness.import_profile("share-alice.json", "alice", "local");
+    let alice_id = extract_profile_id(&alice);
+    harness.start_daemon(&alice_id);
+    harness.wait_for_runtime(&alice_id, Duration::from_secs(20));
+
+    let onboard = harness.run_check(&alice_id, "onboard");
+    assert_eq!(onboard.get("kind").and_then(Value::as_str), Some("onboard"));
+
+    harness.stop_daemon(&alice_id);
+
+    for kind in ["onboard", "sign", "ecdh"] {
+        let failure = harness.run_json_with_env(
+            &["check", kind, "--profile", &alice_id],
+            &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+        );
+        assert!(
+            failure.get("ready").and_then(Value::as_bool) == Some(false),
+            "expected check {kind} to report not-ready after daemon stop: {failure:?}"
+        );
+        assert!(
+            failure
+                .get("reasons_not_ready")
+                .and_then(Value::as_array)
+                .is_some_and(|reasons| reasons
+                    .iter()
+                    .any(|reason| reason.as_str() == Some("daemon_unreachable"))),
+            "expected daemon_unreachable reason for check {kind}: {failure:?}"
+        );
+        assert!(
+            failure
+                .get("details")
+                .and_then(|details| details.get("daemon_error"))
+                .and_then(Value::as_str)
+                .is_some_and(|message| message.contains("daemon metadata")),
+            "expected daemon metadata error details for check {kind}: {failure:?}"
+        );
+    }
+}
+
+#[test]
 fn relay_commands_mutate_profiles_and_report_connectivity() {
     let mut harness = TestHarness::new("utility-relays");
     harness.start_relay();

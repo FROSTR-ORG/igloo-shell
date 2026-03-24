@@ -56,6 +56,34 @@ fn onboard_with_password_flag_creates_profile() {
 }
 
 #[test]
+fn exported_bfonboard_round_trips_through_shell_onboard() {
+    let mut harness = TestHarness::new("onboarding-roundtrip");
+    harness.start_relay();
+    harness.keygen(2, 4);
+    harness.set_relay_profile("local");
+
+    let alice = harness.import_profile("share-alice.json", "alice", "local");
+    let alice_id = extract_profile_id(&alice);
+    harness.start_daemon(&alice_id);
+    harness.wait_for_runtime(&alice_id, Duration::from_secs(20));
+
+    let package = harness.export_bfonboard_package(&alice_id, "share-carol.json", "roundtrip-pass");
+    let package_path = harness.save_onboarding_package("carol-roundtrip.onboarding", &package);
+
+    let imported = harness.onboard(
+        &package_path,
+        "carol-roundtrip",
+        "roundtrip-pass",
+        "vault-passphrase",
+    );
+    let profile_id = extract_profile_id(&imported);
+    assert_ne!(profile_id, alice_id);
+
+    harness.start_daemon(&profile_id);
+    harness.wait_for_runtime(&profile_id, Duration::from_secs(20));
+}
+
+#[test]
 fn profile_load_without_runtime_start_prints_next_commands() {
     let mut harness = TestHarness::new("profile-load-summary");
     harness.start_relay();
