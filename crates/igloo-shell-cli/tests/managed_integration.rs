@@ -3,7 +3,7 @@ mod support;
 use std::time::Duration;
 
 use serde_json::Value;
-use support::{TestHarness, extract_profile_id};
+use support::{TestHarness, extract_profile_id, extract_profile_label};
 
 #[test]
 fn onboard_with_password_flag_creates_profile() {
@@ -300,6 +300,137 @@ fn recover_with_start_attaches_to_daemon_log() {
 }
 
 #[test]
+fn rotate_key_replaces_profile_with_bfonboard() {
+    let mut harness = TestHarness::new("rotate-key-json");
+    harness.start_relay();
+    harness.keygen(2, 4);
+    harness.set_relay_profile("local");
+
+    let alice = harness.import_profile("share-alice.json", "alice", "local");
+    let alice_id = extract_profile_id(&alice);
+    let alice_label = extract_profile_label(&alice);
+    let bob = harness.import_profile("share-bob.json", "bob", "local");
+    let bob_id = extract_profile_id(&bob);
+    harness.start_daemon(&bob_id);
+    harness.wait_for_runtime(&bob_id, Duration::from_secs(20));
+    let package = harness.export_bfonboard_package(&bob_id, "share-carol.json", "rotate-pass");
+    let package_path = harness.save_onboarding_package("alice-rotate.onboarding", &package);
+
+    let rotated = harness.rotate_key(&package_path, &alice_id, "rotate-pass", "vault-passphrase");
+    let new_profile_id = extract_profile_id(&rotated);
+    let expected_load = format!("igloo-shell profile load {new_profile_id}");
+
+    assert_ne!(new_profile_id, alice_id);
+    assert_eq!(
+        rotated
+            .get("rotation_update")
+            .and_then(|value| value.get("replaced_profile_id"))
+            .and_then(Value::as_str),
+        Some(alice_id.as_str())
+    );
+    assert_eq!(
+        rotated
+            .get("next")
+            .and_then(|value| value.get("load"))
+            .and_then(Value::as_str),
+        Some(expected_load.as_str())
+    );
+
+    let profiles = harness.list_profiles();
+    let items = profiles.as_array().expect("profile array");
+    assert_eq!(items.len(), 2);
+    let rotated = items
+        .iter()
+        .find(|item| item.get("id").and_then(Value::as_str) == Some(new_profile_id.as_str()))
+        .expect("rotated profile");
+    assert_eq!(
+        rotated.get("label").and_then(Value::as_str),
+        Some(alice_label.as_str())
+    );
+}
+
+#[test]
+fn rotate_key_with_daemon_starts_replacement_runtime() {
+    let mut harness = TestHarness::new("rotate-key-daemon");
+    harness.start_relay();
+    harness.keygen(2, 4);
+    harness.set_relay_profile("local");
+
+    let alice = harness.import_profile("share-alice.json", "alice", "local");
+    let alice_id = extract_profile_id(&alice);
+    let alice_label = extract_profile_label(&alice);
+    let bob = harness.import_profile("share-bob.json", "bob", "local");
+    let bob_id = extract_profile_id(&bob);
+    harness.start_daemon(&bob_id);
+    harness.wait_for_runtime(&bob_id, Duration::from_secs(20));
+    let package = harness.export_bfonboard_package(&bob_id, "share-carol.json", "rotate-pass");
+    let package_path = harness.save_onboarding_package("alice-rotate-daemon.onboarding", &package);
+
+    let result = harness.run(&[
+        "rotate-key",
+        support::path_arg(&package_path),
+        "--profile",
+        &alice_id,
+        "--onboard-secret",
+        "rotate-pass",
+        "--vault-secret",
+        "vault-passphrase",
+        "--daemon",
+    ]);
+
+    assert!(result.stdout.contains("Rotation update complete."));
+    assert!(
+        result
+            .stdout
+            .contains("igloo-shell runtime status --profile")
+    );
+
+    let new_profile_id =
+        harness.wait_for_replaced_profile_id(&alice_label, &alice_id, Duration::from_secs(20));
+    assert_ne!(new_profile_id, alice_id);
+    harness.wait_for_runtime(&new_profile_id, Duration::from_secs(20));
+}
+
+#[test]
+fn rotate_key_with_start_attaches_to_daemon_log() {
+    let mut harness = TestHarness::new("rotate-key-start");
+    harness.start_relay();
+    harness.keygen(2, 4);
+    harness.set_relay_profile("local");
+
+    let alice = harness.import_profile("share-alice.json", "alice", "local");
+    let alice_id = extract_profile_id(&alice);
+    let alice_label = extract_profile_label(&alice);
+    let bob = harness.import_profile("share-bob.json", "bob", "local");
+    let bob_id = extract_profile_id(&bob);
+    harness.start_daemon(&bob_id);
+    harness.wait_for_runtime(&bob_id, Duration::from_secs(20));
+    let package = harness.export_bfonboard_package(&bob_id, "share-carol.json", "rotate-pass");
+    let package_path = harness.save_onboarding_package("alice-rotate-start.onboarding", &package);
+
+    let _result = harness.run_for_a_bit_with_env(
+        &[
+            "rotate-key",
+            support::path_arg(&package_path),
+            "--profile",
+            &alice_id,
+            "--onboard-secret",
+            "rotate-pass",
+            "--vault-secret",
+            "vault-passphrase",
+            "--start",
+        ],
+        &[],
+        Duration::from_secs(10),
+    );
+
+    let new_profile_id =
+        harness.wait_for_replaced_profile_id(&alice_label, &alice_id, Duration::from_secs(20));
+    assert_ne!(new_profile_id, alice_id);
+    harness.wait_for_runtime(&new_profile_id, Duration::from_secs(20));
+}
+
+#[test]
 fn onboard_non_json_with_daemon_starts_background_runtime() {
     let mut harness = TestHarness::new("onboard-non-json-daemon");
     harness.start_relay();
@@ -377,8 +508,7 @@ fn onboard_with_start_attaches_to_daemon_log() {
         Duration::from_secs(10),
     );
 
-    let profile_id =
-        harness.wait_for_profile_id_by_label("bob-start", Duration::from_secs(20));
+    let profile_id = harness.wait_for_profile_id_by_label("bob-start", Duration::from_secs(20));
     harness.wait_for_runtime(&profile_id, Duration::from_secs(20));
 }
 

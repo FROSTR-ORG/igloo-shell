@@ -115,7 +115,7 @@ run_gen() {
   devtools_cmd keygen \
     --out-dir "${MATERIAL_DIR}" \
     --threshold 2 \
-    --count 3 \
+    --count 4 \
     --relay "${RELAY_URL}" >/dev/null
 
   managed_shell_cmd relays set local "${RELAY_URL}" >/dev/null
@@ -262,14 +262,30 @@ run_smoke() {
   run_start
 
   managed_shell_cmd profile doctor "${ALICE_PROFILE_ID}" >/dev/null
+  managed_shell_cmd daemon status --profile "${ALICE_PROFILE_ID}" >/dev/null
   managed_shell_cmd runtime status --profile "${ALICE_PROFILE_ID}" >/dev/null
+  managed_shell_cmd runtime diagnostics --profile "${ALICE_PROFILE_ID}" >/dev/null
+  managed_shell_cmd check sign --profile "${ALICE_PROFILE_ID}" >/dev/null
+  managed_shell_cmd check ecdh --profile "${ALICE_PROFILE_ID}" >/dev/null
   local peer_json peer
   peer_json="$(managed_shell_cmd peer list --profile "${ALICE_PROFILE_ID}")"
+  local first_peer=""
   while IFS= read -r peer; do
     [[ -n "${peer}" ]] || continue
+    [[ -n "${first_peer}" ]] || first_peer="${peer}"
     managed_shell_cmd peer ping --profile "${ALICE_PROFILE_ID}" "${peer}" >/dev/null
-    managed_shell_cmd peer onboard --profile "${ALICE_PROFILE_ID}" "${peer}" >/dev/null
+    break
   done < <(printf '%s\n' "${peer_json}" | parse_json_pubkeys)
+  if [[ -n "${first_peer}" ]]; then
+    managed_shell_cmd peer onboard --profile "${ALICE_PROFILE_ID}" "${first_peer}" >/dev/null
+    managed_shell_cmd policy set-peer-override \
+      --profile "${ALICE_PROFILE_ID}" \
+      "${first_peer}" \
+      --direction request \
+      --method sign \
+      --value deny >/dev/null
+    managed_shell_cmd policy clear-peer --profile "${ALICE_PROFILE_ID}" "${first_peer}" >/dev/null
+  fi
   managed_shell_cmd runtime sign --profile "${ALICE_PROFILE_ID}" \
     aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >/dev/null
 

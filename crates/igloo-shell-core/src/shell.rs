@@ -1723,28 +1723,6 @@ pub async fn apply_rotation_update_from_bfonboard_value(
     )
 }
 
-pub async fn apply_rotation_update_from_bfshare_value(
-    paths: &ShellPaths,
-    target_profile_id: &str,
-    package_raw: &str,
-    package_password: String,
-    vault_passphrase: Option<String>,
-) -> Result<ProfileImportResult> {
-    let target = read_profile(paths, target_profile_id)?;
-    let target_payload =
-        profile_to_package_payload(paths, target_profile_id, vault_passphrase.clone())?;
-    let (_, rotated_payload) =
-        preview_bfshare_recovery(package_raw, package_password, Some(target.label.clone())).await?;
-
-    finalize_rotation_update_import(
-        paths,
-        &target,
-        target_payload,
-        rotated_payload,
-        vault_passphrase,
-    )
-}
-
 pub(crate) fn import_profile_from_bfprofile_payload(
     paths: &ShellPaths,
     payload: BfProfilePayload,

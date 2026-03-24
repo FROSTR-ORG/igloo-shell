@@ -12,7 +12,7 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, read};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use igloo_shell_core::shell::{
     DaemonMetadata, PolicyDirection, PolicyMethod, RelayProfile, SetupRequest, ShellCheckKind,
-    ShellPaths, add_relays, apply_rotation_update_from_bfshare_value, check_profile_runtime,
+    ShellPaths, add_relays, apply_rotation_update_from_bfonboard_value, check_profile_runtime,
     clear_profile_peer_policy, create_generated_keyset_draft, daemon_log_path,
     daemon_runtime_query, doctor_profile, export_generated_onboarding_package, export_profile,
     export_profile_as_bfonboard, export_profile_as_bfprofile, export_profile_as_bfshare,
@@ -52,6 +52,7 @@ enum Commands {
     Export(ExportArgs),
     Recover(RecoverArgs),
     Onboard(OnboardArgs),
+    RotateKey(RotateKeyArgs),
     Keygen(KeygenArgs),
     Setup(SetupArgs),
     Profile {
@@ -289,12 +290,31 @@ struct RecoverArgs {
     bfshare_or_path: String,
     #[arg(long)]
     label: Option<String>,
-    #[arg(long)]
-    replace_profile: Option<String>,
     #[arg(long, conflicts_with = "package_secret_file")]
     package_secret: Option<String>,
     #[arg(long, conflicts_with = "package_secret")]
     package_secret_file: Option<String>,
+    #[arg(long, conflicts_with = "vault_secret_file")]
+    vault_secret: Option<String>,
+    #[arg(long, conflicts_with = "vault_secret")]
+    vault_secret_file: Option<String>,
+    #[arg(long, conflicts_with = "daemon", conflicts_with = "json")]
+    start: bool,
+    #[arg(long, conflicts_with = "start")]
+    daemon: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct RotateKeyArgs {
+    package_or_path: String,
+    #[arg(long)]
+    profile: String,
+    #[arg(long, conflicts_with = "onboard_secret_file")]
+    onboard_secret: Option<String>,
+    #[arg(long, conflicts_with = "onboard_secret")]
+    onboard_secret_file: Option<String>,
     #[arg(long, conflicts_with = "vault_secret_file")]
     vault_secret: Option<String>,
     #[arg(long, conflicts_with = "vault_secret")]
@@ -467,6 +487,7 @@ async fn main() -> Result<()> {
         Commands::Export(args) => handle_export(&paths, args)?,
         Commands::Recover(args) => handle_recover(&paths, args).await?,
         Commands::Onboard(args) => handle_onboard(&paths, args).await?,
+        Commands::RotateKey(args) => handle_rotate_key(&paths, args).await?,
         Commands::Keygen(args) => handle_keygen(&paths, args).await?,
         Commands::Setup(args) => handle_setup(&paths, args).await?,
         Commands::Profile { command } => handle_profile(&paths, command).await?,
@@ -708,27 +729,16 @@ async fn handle_recover(paths: &ShellPaths, args: RecoverArgs) -> Result<()> {
         "recover requires vault secret input; use --vault-secret / --vault-secret-file, or run on a TTY",
         prompt_vault_secret,
     )?;
-    let import = if let Some(target_profile_id) = args.replace_profile.as_deref() {
-        apply_rotation_update_from_bfshare_value(
-            paths,
-            target_profile_id,
-            &package_raw,
-            package_secret,
-            Some(vault_secret.clone()),
-        )
-        .await?
-    } else {
-        let label = resolve_profile_label(args.label)?;
-        recover_profile_from_bfshare_value(
-            paths,
-            &package_raw,
-            package_secret,
-            Some(label),
-            None,
-            Some(vault_secret.clone()),
-        )
-        .await?
-    };
+    let label = resolve_profile_label(args.label)?;
+    let import = recover_profile_from_bfshare_value(
+        paths,
+        &package_raw,
+        package_secret,
+        Some(label),
+        None,
+        Some(vault_secret.clone()),
+    )
+    .await?;
     if let Ok(profile) = result_profile(&import) {
         if let Err(err) = publish_profile_backup(paths, &profile.id, None).await {
             eprintln!("warning: failed to publish encrypted profile backup: {err}");
@@ -767,6 +777,79 @@ async fn handle_recover(paths: &ShellPaths, args: RecoverArgs) -> Result<()> {
         return Ok(());
     }
     print_json(&import)
+}
+
+async fn handle_rotate_key(paths: &ShellPaths, args: RotateKeyArgs) -> Result<()> {
+    let package_raw = read_package_or_inline(&args.package_or_path)?;
+    let vault_secret = resolve_vault_secret(args.vault_secret, args.vault_secret_file)?;
+    let onboarding_secret = resolve_onboard_secret(args.onboard_secret, args.onboard_secret_file)?;
+    let target = read_profile(paths, &args.profile)?;
+    let old_profile_id = target.id.clone();
+
+    let import = apply_rotation_update_from_bfonboard_value(
+        paths,
+        &old_profile_id,
+        &package_raw,
+        onboarding_secret,
+        Some(vault_secret.clone()),
+    )
+    .await?;
+
+    let profile = result_profile(&import)?;
+    let new_profile_id = profile.id.clone();
+
+    if let Err(err) = publish_profile_backup(paths, &new_profile_id, None).await {
+        eprintln!("warning: failed to publish encrypted profile backup: {err}");
+    }
+
+    let daemon = if args.daemon {
+        let (metadata, existing) =
+            ensure_profile_daemon(paths, &new_profile_id, Some(vault_secret.clone())).await?;
+        Some((metadata, existing))
+    } else {
+        None
+    };
+
+    if args.json {
+        return print_json(&serde_json::json!({
+            "import": import,
+            "rotation_update": {
+                "replaced_profile_id": old_profile_id,
+                "profile_id": new_profile_id,
+            },
+            "daemon": daemon.as_ref().map(|(metadata, existing)| serde_json::json!({
+                "started": !existing,
+                "metadata": metadata,
+            })),
+            "next": {
+                "load": format!("igloo-shell profile load {}", profile.id),
+                "start": format!("igloo-shell profile load {} --start", profile.id),
+                "daemon": format!("igloo-shell profile load {} --daemon", profile.id),
+            }
+        }));
+    }
+
+    if args.start {
+        println!(
+            "Rotation update complete. Replaced profile {} with {}.",
+            short_profile_id(&old_profile_id),
+            short_profile_id(&new_profile_id)
+        );
+        return start_profile_attached(paths, profile, vault_secret).await;
+    }
+
+    print_profile_ready_summary("Rotation update complete.", profile);
+    println!(
+        "Replaced profile {} with {}.",
+        short_profile_id(&old_profile_id),
+        short_profile_id(&new_profile_id)
+    );
+    if let Some((metadata, existing)) = daemon {
+        print_daemon_started_summary(profile, &metadata, existing);
+        return Ok(());
+    }
+    print_profile_next_commands(&new_profile_id);
+    Ok(())
 }
 
 async fn handle_keygen(paths: &ShellPaths, args: KeygenArgs) -> Result<()> {
@@ -2177,6 +2260,46 @@ mod tests {
     }
 
     #[test]
+    fn recover_cli_rejects_replace_profile_flag() {
+        let err = Cli::try_parse_from([
+            "igloo-shell",
+            "recover",
+            "package",
+            "--label",
+            "demo",
+            "--package-secret",
+            "pkg",
+            "--vault-secret",
+            "vault",
+            "--replace-profile",
+            "old-profile",
+        ])
+        .expect_err("removed flag should fail");
+        assert!(err.to_string().contains("--replace-profile"));
+    }
+
+    #[test]
+    fn rotate_key_cli_accepts_start_flag() {
+        let cli = Cli::try_parse_from([
+            "igloo-shell",
+            "rotate-key",
+            "package",
+            "--profile",
+            "old-profile",
+            "--onboard-secret",
+            "invite",
+            "--vault-secret",
+            "vault",
+            "--start",
+        ])
+        .expect("start flag should parse");
+        match cli.command {
+            super::Commands::RotateKey(args) => assert!(args.start),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn onboard_cli_rejects_start_with_json() {
         let err = Cli::try_parse_from([
             "igloo-shell",
@@ -2184,6 +2307,25 @@ mod tests {
             "package",
             "--label",
             "demo",
+            "--onboard-secret",
+            "invite",
+            "--vault-secret",
+            "vault",
+            "--start",
+            "--json",
+        ])
+        .expect_err("conflicting flags should fail");
+        assert!(err.to_string().contains("--start"));
+    }
+
+    #[test]
+    fn rotate_key_cli_rejects_start_with_json() {
+        let err = Cli::try_parse_from([
+            "igloo-shell",
+            "rotate-key",
+            "package",
+            "--profile",
+            "old-profile",
             "--onboard-secret",
             "invite",
             "--vault-secret",

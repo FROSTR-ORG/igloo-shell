@@ -307,8 +307,30 @@ Rules:
 - a successful recovery prints the resulting profile and next commands unless `--json` is supplied
 - `--start` starts the resulting profile and attaches to daemon log output
 - `--daemon` starts the resulting profile in the background after recovery completes
+- `recover` is recovery-only and does not replace an existing profile in place
 
-### 6.2d `export`
+### 6.2d `rotate-key`
+
+Commands:
+
+- `rotate-key <package-or-path> --profile <profile-id>`
+- `rotate-key <package-or-path> --profile <profile-id> --onboard-secret <value> --vault-secret <value>`
+- `rotate-key <package-or-path> --profile <profile-id> --onboard-secret-file <path> --vault-secret-file <path>`
+- `rotate-key <package-or-path> ... --start`
+- `rotate-key <package-or-path> ... --daemon`
+- `rotate-key <package-or-path> ... --json`
+
+Rules:
+
+- `rotate-key` applies a rotated `bfonboard` package to an existing local profile
+- `--profile` is required and identifies the local profile to replace
+- `<package-or-path>` accepts either a file path or an inline `bfonboard...` payload
+- a successful rotation update replaces the selected profile with a new profile id while preserving the intended local label and runtime options
+- `--start` starts the replacement profile and attaches to daemon log output
+- `--daemon` starts the replacement profile in the background after replacement completes
+- `--json` keeps the command in automation/json mode
+
+### 6.2e `export`
 
 Commands:
 
@@ -319,7 +341,7 @@ Rules:
 - export writes explicit files chosen by the user and remains CLI-only
 - canonical onboarding artifacts are emitted through `export --format bfonboard`
 
-### 6.2e `onboard`
+### 6.2f `onboard`
 
 Commands:
 
@@ -345,7 +367,7 @@ Rules:
 - `--daemon` starts the resulting profile in the background after onboarding completes
 - `--json` keeps the command in automation/json mode
 
-### 6.2f `keygen`
+### 6.2g `keygen`
 
 Commands:
 
@@ -496,7 +518,7 @@ Required behavior:
 - `profile load --start` starts the daemon and attaches to daemon log output
 - `profile load --daemon` starts the daemon in the background and exits
 - successful onboarding/import/recover/keygen flows print the resulting profile and next commands by default
-- `import`, `recover`, and `onboard` may use `--start` or `--daemon` to begin daemon execution immediately
+- `import`, `recover`, `onboard`, and `rotate-key` may use `--start` or `--daemon` to begin daemon execution immediately
 - daemon logs are viewed through CLI output or `daemon logs`
 - daemon status, runtime status, peer visibility, and policy inspection are all exposed through first-class CLI commands rather than a session dashboard
 

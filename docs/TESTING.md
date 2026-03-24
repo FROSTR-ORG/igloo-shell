@@ -15,6 +15,7 @@ PR-gated Rust coverage now includes:
 - public CLI `onboard` integration coverage for interactive-resolution logic, `--onboard-secret`, `--onboard-secret-file`, `--vault-secret`, `--vault-secret-file`, and inline package flows
 - public CLI coverage for `profile load` routing, daemon-start flags, and post-import/recover/onboard/keygen next-command output
 - public CLI foreground-start coverage for `import --start`, `recover --start`, and `onboard --start`
+- public CLI rotation-update coverage for `rotate-key`, `rotate-key --daemon`, and `rotate-key --start`
 - managed runtime integration coverage for ping, peer onboarding, signing, ECDH, and invite lifecycle
 - live policy command coverage for manifest persistence and daemon-backed runtime updates
 

@@ -10,6 +10,7 @@ cargo run -p igloo-shell-cli -- profile load
 cargo run -p igloo-shell-cli -- profile load alice --start
 cargo run -p igloo-shell-cli -- profile load alice --daemon
 cargo run -p igloo-shell-cli -- onboard ./onboard-bob.txt --label bob --onboard-secret-file ./onboard-bob.password.txt --vault-secret-file ./vault-secret.txt --start
+cargo run -p igloo-shell-cli -- rotate-key ./rotated-bob.txt --profile alice --onboard-secret-file ./rotated-bob.password.txt --vault-secret-file ./vault-secret.txt --daemon
 cargo run -p igloo-shell-cli -- profile backup alice --vault-passphrase-env IGLOO_SHELL_VAULT_PASSPHRASE
 cargo run -p igloo-shell-cli -- onboard ./onboard-bob.txt --label bob --onboard-secret-file ./onboard-bob.password.txt --vault-secret-file ./vault-secret.txt
 cargo run -p igloo-shell-cli -- import ./bob.bfprofile.txt --label bob --package-secret-file ./bob.package-secret.txt --vault-secret-file ./vault-secret.txt
@@ -21,7 +22,7 @@ cargo run -p igloo-shell-cli -- relays set demo --label Demo ws://127.0.0.1:8194
 cargo run -p igloo-shell-cli -- relays default demo
 ```
 
-The shell store and CLI-first flow model are live. `profile load`, `onboard`, `import`, `recover`, and `keygen` are the supported profile entry paths. `profile load --start` is the explicit foreground daemon/log path, and `--daemon` is the background-start convenience flag for profile-producing flows. `V2-SHELL-SPEC.md` is the source of truth for the broader command surface.
+The shell store and CLI-first flow model are live. `profile load`, `onboard`, `import`, `recover`, `rotate-key`, and `keygen` are the supported profile entry paths. `profile load --start` is the explicit foreground daemon/log path, and `--daemon` is the background-start convenience flag for profile-producing flows. `V2-SHELL-SPEC.md` is the source of truth for the broader command surface.
 
 The CLI replaces the old dashboard-style shell flow with explicit operator commands:
 
@@ -31,6 +32,8 @@ cargo run -p igloo-shell-cli -- runtime status --profile alice
 cargo run -p igloo-shell-cli -- peer list --profile alice
 cargo run -p igloo-shell-cli -- policy show --profile alice
 ```
+
+Use `recover` for `bfshare` recovery. Use `rotate-key` for in-place profile replacement from a rotated `bfonboard` package.
 
 ## Developer Utilities
 

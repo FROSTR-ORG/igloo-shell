@@ -312,6 +312,48 @@ impl TestHarness {
         ])
     }
 
+    pub fn rotate_key(
+        &self,
+        package_path: &Path,
+        profile_id: &str,
+        onboarding_secret: &str,
+        vault_secret: &str,
+    ) -> Value {
+        self.run_json(&[
+            "rotate-key",
+            path_arg(package_path),
+            "--profile",
+            profile_id,
+            "--onboard-secret",
+            onboarding_secret,
+            "--vault-secret",
+            vault_secret,
+            "--json",
+        ])
+    }
+
+    pub fn rotate_key_expect_failure(
+        &self,
+        package_path: &Path,
+        profile_id: &str,
+        onboarding_secret: &str,
+        vault_secret: &str,
+    ) -> CommandResult {
+        self.run_expect_failure(
+            &[
+                "rotate-key",
+                path_arg(package_path),
+                "--profile",
+                profile_id,
+                "--onboard-secret",
+                onboarding_secret,
+                "--vault-secret",
+                vault_secret,
+            ],
+            &[],
+        )
+    }
+
     pub fn export_bfonboard_package(
         &self,
         profile_id: &str,
@@ -367,6 +409,46 @@ impl TestHarness {
             .expect("read bfshare export")
             .trim()
             .to_string()
+    }
+
+    pub fn export_bfprofile_package(&self, profile_id: &str, password: &str) -> String {
+        let out_path = self.root.join(format!("{profile_id}.bfprofile"));
+        self.run_with_env(
+            &[
+                "export",
+                profile_id,
+                "--format",
+                "bfprofile",
+                "--out",
+                path_arg(&out_path),
+                "--package-password-env",
+                "IGLOO_SHELL_PACKAGE_PASSWORD",
+            ],
+            &[
+                ("IGLOO_SHELL_PACKAGE_PASSWORD", password),
+                ("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase"),
+            ],
+        );
+        fs::read_to_string(&out_path)
+            .expect("read bfprofile export")
+            .trim()
+            .to_string()
+    }
+
+    pub fn export_raw_profile(&self, profile_id: &str) -> PathBuf {
+        let out_path = self.root.join(format!("{profile_id}.raw.json"));
+        self.run_with_env(
+            &[
+                "export",
+                profile_id,
+                "--format",
+                "raw",
+                "--out",
+                path_arg(&out_path),
+            ],
+            &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+        );
+        out_path
     }
 
     pub fn save_onboarding_package(&self, name: &str, package: &str) -> PathBuf {
@@ -440,6 +522,114 @@ impl TestHarness {
         self.run_json(&["profile", "list"])
     }
 
+    pub fn show_profile(&self, profile_id: &str) -> Value {
+        self.run_json(&["profile", "show", profile_id])
+    }
+
+    pub fn backup_profile(&self, profile_id: &str) -> Value {
+        self.run_json_with_env(
+            &[
+                "profile",
+                "backup",
+                profile_id,
+                "--vault-passphrase-env",
+                "IGLOO_SHELL_VAULT_PASSPHRASE",
+            ],
+            &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+        )
+    }
+
+    pub fn doctor_profile(&self, profile_id: &str) -> Value {
+        self.run_json(&["profile", "doctor", profile_id])
+    }
+
+    pub fn remove_profile(&self, profile_id: &str) -> Value {
+        self.run_json(&["profile", "remove", profile_id, "--yes"])
+    }
+
+    pub fn daemon_status(&self, profile_id: Option<&str>) -> Value {
+        match profile_id {
+            Some(profile_id) => self.run_json_with_env(
+                &["daemon", "status", "--profile", profile_id],
+                &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+            ),
+            None => self.run_json(&["daemon", "status"]),
+        }
+    }
+
+    pub fn daemon_logs(&self, profile_id: &str) -> Value {
+        self.run_json(&["daemon", "logs", "--profile", profile_id])
+    }
+
+    pub fn runtime_status(&self, profile_id: &str) -> Value {
+        self.run_json_with_env(
+            &["runtime", "status", "--profile", profile_id],
+            &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+        )
+    }
+
+    pub fn runtime_diagnostics(&self, profile_id: &str) -> Value {
+        self.run_json_with_env(
+            &["runtime", "diagnostics", "--profile", profile_id],
+            &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+        )
+    }
+
+    pub fn runtime_ops(&self, profile_id: &str) -> Value {
+        self.run_json_with_env(
+            &["runtime", "ops", "--profile", profile_id],
+            &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+        )
+    }
+
+    pub fn runtime_wipe_state(&self, profile_id: &str) -> Value {
+        self.run_json_with_env(
+            &["runtime", "wipe-state", "--profile", profile_id, "--yes"],
+            &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+        )
+    }
+
+    pub fn relay_list(&self) -> Value {
+        self.run_json(&["relays", "list"])
+    }
+
+    pub fn relay_set(&self, profile_id: &str, label: Option<&str>, relays: &[&str]) -> Value {
+        let mut args = vec!["relays", "set", profile_id];
+        if let Some(label) = label {
+            args.push("--label");
+            args.push(label);
+        }
+        args.extend(relays.iter().copied());
+        self.run_json(&args)
+    }
+
+    pub fn relay_add(&self, profile_id: &str, relays: &[&str]) -> Value {
+        let mut args = vec!["relays", "add", profile_id];
+        args.extend(relays.iter().copied());
+        self.run_json(&args)
+    }
+
+    pub fn relay_remove(&self, profile_id: &str, relays: &[&str]) -> Value {
+        let mut args = vec!["relays", "remove", profile_id];
+        args.extend(relays.iter().copied());
+        self.run_json(&args)
+    }
+
+    pub fn relay_default(&self, profile_id: &str) -> Value {
+        self.run_json(&["relays", "default", profile_id])
+    }
+
+    pub fn relay_test(&self, profile_id: Option<&str>) -> Value {
+        match profile_id {
+            Some(profile_id) => self.run_json(&["relays", "test", "--relay-profile", profile_id]),
+            None => self.run_json(&["relays", "test"]),
+        }
+    }
+
+    pub fn keys_convert(&self, from: &str, value: &str) -> Value {
+        self.run_json(&["keys", "convert", "--from", from, "--value", value])
+    }
+
     pub fn wait_for_profile_id_by_label(&self, label: &str, timeout: Duration) -> String {
         let start = Instant::now();
         while start.elapsed() < timeout {
@@ -461,6 +651,35 @@ impl TestHarness {
             thread::sleep(Duration::from_millis(200));
         }
         panic!("timed out waiting for profile label {label}");
+    }
+
+    pub fn wait_for_replaced_profile_id(
+        &self,
+        label: &str,
+        previous_profile_id: &str,
+        timeout: Duration,
+    ) -> String {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            let profiles = self.list_profiles();
+            if let Some(profile_id) = profiles
+                .as_array()
+                .and_then(|items| {
+                    items.iter().find(|item| {
+                        item.get("label")
+                            .and_then(Value::as_str)
+                            .is_some_and(|candidate| candidate == label)
+                            && item.get("id").and_then(Value::as_str) != Some(previous_profile_id)
+                    })
+                })
+                .and_then(|item| item.get("id"))
+                .and_then(Value::as_str)
+            {
+                return profile_id.to_string();
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
+        panic!("timed out waiting for replacement profile label {label}");
     }
 
     fn command(&self, args: &[&str]) -> Command {
@@ -591,6 +810,21 @@ pub fn extract_profile_id(value: &Value) -> String {
         .or_else(|| value.get("id").and_then(Value::as_str))
         .map(ToString::to_string)
         .expect("extract profile id")
+}
+
+pub fn extract_profile_label(value: &Value) -> String {
+    value
+        .get("profile")
+        .and_then(|profile| profile.get("label"))
+        .or_else(|| {
+            value
+                .get("import")
+                .and_then(|import| import.get("profile"))
+                .and_then(|profile| profile.get("label"))
+        })
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .expect("extract profile label")
 }
 
 pub fn extract_token(value: &Value) -> String {
