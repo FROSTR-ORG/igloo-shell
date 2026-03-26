@@ -22,8 +22,8 @@ use bifrost_core::types::{PeerPolicy, PeerPolicyOverride, PolicyOverrideValue};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use frostr_utils::{
-    BfGroupMember, BfManualPeerPolicyOverride, BfOnboardPayload, BfProfileDevice, BfProfileGroup,
-    BfProfilePayload, BfRemotePeerPolicyObservation, BfSharePayload, CreateKeysetConfig,
+    BfManualPeerPolicyOverride, BfOnboardPayload, BfProfileDevice, BfProfilePayload,
+    BfRemotePeerPolicyObservation, BfSharePayload, CreateKeysetConfig,
     PROFILE_BACKUP_EVENT_KIND, RotateKeysetRequest, bf_peer_scoped_policy_profile_to_core,
     build_profile_backup_event, core_peer_policy_override_to_bf, create_encrypted_profile_backup,
     create_keyset, decode_bfonboard_package, decode_bfprofile_package, decode_bfshare_package,
@@ -1566,6 +1566,7 @@ pub async fn preview_bfshare_recovery(
     let payload = BfProfilePayload {
         profile_id: derive_profile_id_for_share_secret(&share.share_secret)?,
         version: backup.version,
+        keyset_name: backup.keyset_name,
         device: BfProfileDevice {
             name: label.clone().unwrap_or_else(|| backup.device.name.clone()),
             share_secret: share.share_secret,
@@ -1573,7 +1574,7 @@ pub async fn preview_bfshare_recovery(
             remote_peer_policy_observations: backup.device.remote_peer_policy_observations,
             relays: backup.device.relays,
         },
-        group: backup.group,
+        group_package: backup.group_package,
     };
     let preview = preview_from_profile_payload(&payload, label, "bfshare")?;
     Ok((preview, payload))
@@ -1700,6 +1701,7 @@ pub async fn recover_profile_from_bfshare_value(
     let payload = BfProfilePayload {
         profile_id: derive_profile_id_for_share_secret(&share.share_secret)?,
         version: backup.version,
+        keyset_name: backup.keyset_name,
         device: BfProfileDevice {
             name: label.unwrap_or_else(|| backup.device.name.clone()),
             share_secret: share.share_secret,
@@ -1707,7 +1709,7 @@ pub async fn recover_profile_from_bfshare_value(
             remote_peer_policy_observations: backup.device.remote_peer_policy_observations,
             relays: backup.device.relays,
         },
-        group: backup.group,
+        group_package: backup.group_package,
     };
     import_profile_from_bfprofile_payload(paths, payload, None, relay_profile, vault_passphrase)
 }
@@ -1720,7 +1722,7 @@ pub fn finalize_rotation_update_import(
     rotated_payload: BfProfilePayload,
     vault_passphrase: Option<String>,
 ) -> Result<ProfileImportResult> {
-    if rotated_payload.group.group_public_key != target_payload.group.group_public_key {
+    if hex::encode(rotated_group.group_pk) != hex::encode(group_from_payload(&target_payload)?.group_pk) {
         bail!("rotation update does not match the selected profile group public key");
     }
     if rotated_payload.profile_id == target_payload.profile_id {
@@ -1791,7 +1793,7 @@ pub async fn apply_rotation_update_from_bfonboard_value(
         profile_to_package_payload(paths, target_profile_id, vault_passphrase.clone())?;
     let connection = connect_onboarding_package_preview(package_raw, onboarding_password).await?;
 
-    if connection.preview.group_public_key != target_payload.group.group_public_key {
+    if connection.preview.group_public_key != hex::encode(group_from_payload(&target_payload)?.group_pk) {
         bail!("rotation update does not match the selected profile group public key");
     }
     if connection.preview.profile_id == target_payload.profile_id {
@@ -1801,6 +1803,7 @@ pub async fn apply_rotation_update_from_bfonboard_value(
     let rotated_payload = BfProfilePayload {
         profile_id: connection.preview.profile_id.clone(),
         version: 1,
+        keyset_name: target_payload.keyset_name.clone(),
         device: BfProfileDevice {
             name: target.label.clone(),
             share_secret: hex::encode(connection.completion.share.seckey),
@@ -1808,22 +1811,7 @@ pub async fn apply_rotation_update_from_bfonboard_value(
             remote_peer_policy_observations: Vec::new(),
             relays: connection.completion.relays.clone(),
         },
-        group: BfProfileGroup {
-            keyset_name: target_payload.group.keyset_name.clone(),
-            group_public_key: hex::encode(connection.completion.group.group_pk),
-            threshold: connection.completion.group.threshold,
-            total_count: connection.completion.group.members.len() as u16,
-            members: connection
-                .completion
-                .group
-                .members
-                .iter()
-                .map(|member| BfGroupMember {
-                    index: member.idx,
-                    share_public_key: hex::encode(&member.pubkey[1..]),
-                })
-                .collect(),
-        },
+        group_package: GroupPackageWire::from(connection.completion.group.clone()),
     };
 
     finalize_rotation_update_import(
@@ -1862,7 +1850,7 @@ pub fn create_rotation_workspace(
     let source_group = group_from_payload(&source_payload)?;
     let source_share = share_from_payload(&source_group, &source_payload)?;
     let source_group_id = hex::encode(get_group_id(&source_group).context("derive source group id")?);
-    let source_keyset_name = source_payload.group.keyset_name.clone();
+    let source_keyset_name = source_payload.keyset_name.clone();
 
     if workspace_root.exists() {
         bail!("rotation workspace already exists at {}", workspace_root.display());
@@ -1910,7 +1898,7 @@ pub fn create_rotation_workspace(
         version: 1,
         source_profile_id: source_profile_id.to_string(),
         source_group_id,
-        source_group_public_key: source_payload.group.group_public_key.clone(),
+        source_group_public_key: hex::encode(source_group.group_pk),
         source_keyset_name,
         source_threshold: source_group.threshold,
         source_count: source_group.members.len() as u16,
@@ -2250,25 +2238,7 @@ pub(crate) fn import_profile_from_bfprofile_payload(
         Some(label.as_deref().unwrap_or(&payload.device.name)),
         &payload.device.relays,
     )?;
-    let group = bifrost_core::types::GroupPackage {
-        group_pk: hex_to_bytes32(&payload.group.group_public_key)?,
-        threshold: payload.group.threshold,
-        members: payload
-            .group
-            .members
-            .iter()
-            .map(|member| {
-                let xonly = hex_to_bytes32(&member.share_public_key)?;
-                let mut pubkey = [0u8; 33];
-                pubkey[0] = 0x02;
-                pubkey[1..].copy_from_slice(&xonly);
-                Ok(bifrost_core::types::MemberPackage {
-                    idx: member.index,
-                    pubkey,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?,
-    };
+    let group = group_from_payload(&payload)?;
     let share = bifrost_core::types::SharePackage {
         idx: find_member_index_for_share_secret(&group, &payload.device.share_secret)?,
         seckey: hex_to_bytes32(&payload.device.share_secret)?,
@@ -2361,6 +2331,7 @@ pub fn import_generated_share(
     let payload = BfProfilePayload {
         profile_id: derive_profile_id_for_share_secret(&share_secret_hex)?,
         version: 1,
+        keyset_name: draft.keyset_name.clone(),
         device: BfProfileDevice {
             name: label.clone(),
             share_secret: share_secret_hex,
@@ -2380,21 +2351,7 @@ pub fn import_generated_share(
             remote_peer_policy_observations: Vec::new(),
             relays: relay_urls,
         },
-        group: BfProfileGroup {
-            keyset_name: draft.keyset_name.clone(),
-            group_public_key: hex::encode(draft.group.group_pk),
-            threshold: draft.group.threshold,
-            total_count: draft.group.members.len() as u16,
-            members: draft
-                .group
-                .members
-                .iter()
-                .map(|member| frostr_utils::BfGroupMember {
-                    index: member.idx,
-                    share_public_key: hex::encode(&member.pubkey[1..]),
-                })
-                .collect(),
-        },
+        group_package: GroupPackageWire::from(draft.group.clone()),
     };
     import_profile_from_bfprofile_payload(paths, payload, Some(label), None, vault_passphrase)
 }
@@ -2476,6 +2433,7 @@ fn profile_to_package_payload(
     Ok(BfProfilePayload {
         profile_id: profile.id.clone(),
         version: 1,
+        keyset_name: profile.label,
         device: BfProfileDevice {
             name: manifest.label,
             share_secret: hex::encode(resolved.share.seckey),
@@ -2483,45 +2441,16 @@ fn profile_to_package_payload(
             remote_peer_policy_observations: Vec::new(),
             relays: resolved.relays,
         },
-        group: BfProfileGroup {
-            keyset_name: profile.label,
-            group_public_key: hex::encode(resolved.group.group_pk),
-            threshold: resolved.group.threshold,
-            total_count: resolved.group.members.len() as u16,
-            members: resolved
-                .group
-                .members
-                .iter()
-                .map(|member| BfPeerlessGroupMember(member))
-                .map(|member| member.into())
-                .collect(),
-        },
+        group_package: GroupPackageWire::from(resolved.group),
     })
 }
 
 fn group_from_payload(payload: &BfProfilePayload) -> Result<bifrost_core::types::GroupPackage> {
-    let members = payload
-        .group
-        .members
-        .iter()
-        .map(|member| {
-            let mut pubkey = [0u8; 33];
-            pubkey[0] = 0x02;
-            pubkey[1..].copy_from_slice(&hex::decode(&member.share_public_key)?);
-            Ok(bifrost_core::types::MemberPackage {
-                idx: member.index,
-                pubkey,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    Ok(bifrost_core::types::GroupPackage {
-        group_pk: hex::decode(&payload.group.group_public_key)?
-            .try_into()
-            .map_err(|_| anyhow!("invalid group public key"))?,
-        threshold: payload.group.threshold,
-        members,
-    })
+    payload
+        .group_package
+        .clone()
+        .try_into()
+        .map_err(|e: bifrost_codec::CodecError| anyhow!("invalid group package: {e}"))
 }
 
 fn share_from_payload(
@@ -2566,6 +2495,7 @@ fn rotation_payload_from_share(
     Ok(BfProfilePayload {
         profile_id: derive_profile_id_for_share_secret(&share_secret)?,
         version: 1,
+        keyset_name: keyset_name.to_string(),
         device: BfProfileDevice {
             name: label,
             share_secret,
@@ -2584,20 +2514,7 @@ fn rotation_payload_from_share(
             remote_peer_policy_observations: Vec::new(),
             relays,
         },
-        group: BfProfileGroup {
-            keyset_name: keyset_name.to_string(),
-            group_public_key: hex::encode(group.group_pk),
-            threshold: group.threshold,
-            total_count: group.members.len() as u16,
-            members: group
-                .members
-                .iter()
-                .map(|member| BfGroupMember {
-                    index: member.idx,
-                    share_public_key: hex::encode(&member.pubkey[1..]),
-                })
-                .collect(),
-        },
+        group_package: GroupPackageWire::from(group.clone()),
     })
 }
 
@@ -2618,9 +2535,9 @@ fn preview_from_profile_payload(
         profile_id: payload.profile_id.clone(),
         label: label.unwrap_or_else(|| payload.device.name.clone()),
         share_public_key,
-        group_public_key: payload.group.group_public_key.clone(),
-        threshold: payload.group.threshold as usize,
-        total_count: payload.group.total_count as usize,
+        group_public_key: payload.group_package.group_pk.clone(),
+        threshold: payload.group_package.threshold as usize,
+        total_count: payload.group_package.members.len(),
         relays: payload.device.relays.clone(),
         peer_pubkey: None,
         source,
@@ -2645,17 +2562,6 @@ fn preview_from_bootstrap_completion(
         peer_pubkey,
         source,
     })
-}
-
-struct BfPeerlessGroupMember<'a>(&'a bifrost_core::types::MemberPackage);
-
-impl From<BfPeerlessGroupMember<'_>> for frostr_utils::BfGroupMember {
-    fn from(value: BfPeerlessGroupMember<'_>) -> Self {
-        Self {
-            index: value.0.idx,
-            share_public_key: hex::encode(&value.0.pubkey[1..]),
-        }
-    }
 }
 
 fn build_policy_overrides_value(policies: &[BfManualPeerPolicyOverride]) -> Result<Value> {
