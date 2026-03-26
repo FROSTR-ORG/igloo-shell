@@ -16,6 +16,7 @@ PR-gated Rust coverage now includes:
 - public CLI coverage for `profile load` routing, daemon-start flags, and post-import/recover/onboard/keygen next-command output
 - public CLI foreground-start coverage for `import --start`, `recover --start`, and `onboard --start`
 - public CLI rotation-update coverage for `rotate-key`, `rotate-key --daemon`, and `rotate-key --start`
+- public CLI operator-rotation coverage for `rotate-keyset init`, `rotate-keyset show`, and `rotate-keyset generate`
 - managed runtime integration coverage for ping, peer onboarding, signing, ECDH, and invite lifecycle
 - live policy command coverage for manifest persistence and daemon-backed runtime updates
 
@@ -48,7 +49,7 @@ scripts/ws_soak.sh --iterations 25 --out dev/audit/work/evidence/ws-soak-$(date 
 - provisions managed profiles through `scripts/devnet.sh`
 - starts the per-profile daemons
 - checks profile doctor, daemon status, runtime status, and peer list
-- executes a real sign request and canonical `bfonboard` export/onboard flow
+- executes a real sign request, canonical `bfonboard` export/onboard flow, and operator-side `rotate-keyset` generation flow
 
 `scripts/ws_soak.sh` now combines:
 

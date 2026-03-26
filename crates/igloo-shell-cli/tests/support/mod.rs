@@ -457,6 +457,77 @@ impl TestHarness {
         path
     }
 
+    pub fn save_text_file(&self, name: &str, contents: &str) -> PathBuf {
+        let path = self.root.join(name);
+        fs::write(&path, contents).expect("write text file");
+        path
+    }
+
+    pub fn rotate_keyset_init(
+        &self,
+        profile_id: &str,
+        threshold: u16,
+        count: u16,
+        workspace: &Path,
+        source_packages: &[&Path],
+    ) -> Value {
+        let mut args = vec![
+            "rotate-keyset".to_string(),
+            "init".to_string(),
+            "--profile".to_string(),
+            profile_id.to_string(),
+            "--threshold".to_string(),
+            threshold.to_string(),
+            "--count".to_string(),
+            count.to_string(),
+            "--workspace".to_string(),
+            path_arg(workspace).to_string(),
+            "--vault-secret".to_string(),
+            "vault-passphrase".to_string(),
+            "--json".to_string(),
+        ];
+        for package in source_packages {
+            args.push("--source-bfshare".to_string());
+            args.push(path_arg(package).to_string());
+        }
+        let argv = args.iter().map(String::as_str).collect::<Vec<_>>();
+        self.run_json(&argv)
+    }
+
+    pub fn rotate_keyset_show(&self, workspace: &Path) -> Value {
+        self.run_json(&[
+            "rotate-keyset",
+            "show",
+            "--workspace",
+            path_arg(workspace),
+            "--json",
+        ])
+    }
+
+    pub fn rotate_keyset_generate(
+        &self,
+        workspace: &Path,
+        distribution_secret: &str,
+        extra_env: &[(&str, &str)],
+    ) -> Value {
+        let mut env = vec![("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")];
+        env.extend_from_slice(extra_env);
+        self.run_json_with_env(
+            &[
+                "rotate-keyset",
+                "generate",
+                "--workspace",
+                path_arg(workspace),
+                "--vault-secret",
+                "vault-passphrase",
+                "--distribution-secret",
+                distribution_secret,
+                "--json",
+            ],
+            &env,
+        )
+    }
+
     pub fn start_daemon(&self, profile_id: &str) {
         self.run_daemon_lifecycle(&["daemon", "start", "--profile", profile_id]);
     }

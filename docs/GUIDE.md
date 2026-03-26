@@ -81,11 +81,15 @@ You can also enter through the flow-specific top-level commands:
 - `igloo-shell import <bfprofile-or-path>`
 - `igloo-shell recover <bfshare-or-path>`
 - `igloo-shell rotate-key <bfonboard-or-path> --profile <profile-id>`
+- `igloo-shell rotate-keyset init --profile <profile-id> --threshold <n> --count <n>`
+- `igloo-shell rotate-keyset show --workspace <path>`
+- `igloo-shell rotate-keyset generate --workspace <path>`
 - `igloo-shell keygen`
 
-Those commands collect their inputs in the CLI, then print the created or updated profile and next commands on success. `onboard`, `import`, `recover`, and `rotate-key` support `--daemon` for background start and `--start` for immediate foreground attach.
+Those commands collect their inputs in the CLI, then print the created or updated profile and next commands on success. `onboard`, `import`, `recover`, `rotate-key`, and `rotate-keyset generate` support `--daemon` for background start, and the profile-producing commands also support `--start` for immediate foreground attach.
 
 Use `recover` for `bfshare`-based recovery only. Use `rotate-key` for in-place device replacement from a rotated `bfonboard` package.
+Use `rotate-keyset` when the shell is acting as the enterprise/operator host that gathers threshold `bfshare` inputs, rotates the keyset, replaces the local profile, and emits `bfonboard` packages for the remaining targets.
 
 Once a profile is running, the core operator surface is:
 

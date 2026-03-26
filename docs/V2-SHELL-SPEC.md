@@ -330,7 +330,48 @@ Rules:
 - `--daemon` starts the replacement profile in the background after replacement completes
 - `--json` keeps the command in automation/json mode
 
-### 6.2e `export`
+### 6.2e `rotate-keyset`
+
+Commands:
+
+- `rotate-keyset init --profile <profile-id> --threshold <n> --count <n>`
+- `rotate-keyset init ... --workspace <path>`
+- `rotate-keyset init ... --source-bfshare <path>...`
+- `rotate-keyset init ... --vault-secret <value>`
+- `rotate-keyset init ... --vault-secret-file <path>`
+- `rotate-keyset show --workspace <path>`
+- `rotate-keyset show --workspace <path> --json`
+- `rotate-keyset generate --workspace <path>`
+- `rotate-keyset generate ... --vault-secret <value> --distribution-secret <value>`
+- `rotate-keyset generate ... --vault-secret-file <path> --distribution-secret-file <path>`
+- `rotate-keyset generate ... --start`
+- `rotate-keyset generate ... --daemon`
+- `rotate-keyset generate ... --json`
+
+Rules:
+
+- `rotate-keyset` is the first-class operator workflow for trusted share rotation in `igloo-shell`
+- `init` creates a workspace manifest at `<workspace>/rotation.json`
+- the workspace manifest records:
+  - source profile id, group id, and group public key
+  - the next threshold/count
+  - threshold `bfshare` source package paths plus env/file secret references
+  - one target entry per rotated member
+- `init` derives the default local replacement target from the selected source profile and current member index
+- `show` reports structural readiness for the workspace without mutating state
+- `generate`:
+  - validates the threshold `bfshare` inputs
+  - reconstructs the existing signing key
+  - rotates the keyset while preserving the same group public key
+  - replaces the selected local source profile immediately
+  - publishes rotated encrypted backups
+  - emits `bfonboard` packages for every non-local rotated target
+- `generate --start` starts the replacement local profile and attaches to daemon log output
+- `generate --daemon` starts the replacement local profile in the background after generation completes
+- `generate --json` returns the local replacement summary plus emitted remote package paths
+- `rotate-keyset` is the enterprise/operator-side generation path; `rotate-key` remains the device-side in-place adoption path
+
+### 6.2f `export`
 
 Commands:
 
@@ -341,7 +382,7 @@ Rules:
 - export writes explicit files chosen by the user and remains CLI-only
 - canonical onboarding artifacts are emitted through `export --format bfonboard`
 
-### 6.2f `onboard`
+### 6.2g `onboard`
 
 Commands:
 
@@ -367,7 +408,7 @@ Rules:
 - `--daemon` starts the resulting profile in the background after onboarding completes
 - `--json` keeps the command in automation/json mode
 
-### 6.2g `keygen`
+### 6.2h `keygen`
 
 Commands:
 
@@ -518,7 +559,7 @@ Required behavior:
 - `profile load --start` starts the daemon and attaches to daemon log output
 - `profile load --daemon` starts the daemon in the background and exits
 - successful onboarding/import/recover/keygen flows print the resulting profile and next commands by default
-- `import`, `recover`, `onboard`, and `rotate-key` may use `--start` or `--daemon` to begin daemon execution immediately
+- `import`, `recover`, `onboard`, `rotate-key`, and `rotate-keyset generate` may use `--start` or `--daemon` to begin daemon execution immediately
 - daemon logs are viewed through CLI output or `daemon logs`
 - daemon status, runtime status, peer visibility, and policy inspection are all exposed through first-class CLI commands rather than a session dashboard
 

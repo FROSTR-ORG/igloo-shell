@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
@@ -24,11 +24,11 @@ use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use frostr_utils::{
     BfGroupMember, BfManualPeerPolicyOverride, BfOnboardPayload, BfProfileDevice, BfProfileGroup,
     BfProfilePayload, BfRemotePeerPolicyObservation, BfSharePayload, CreateKeysetConfig,
-    PROFILE_BACKUP_EVENT_KIND, bf_peer_scoped_policy_profile_to_core, build_profile_backup_event,
-    core_peer_policy_override_to_bf, create_encrypted_profile_backup, create_keyset,
-    decode_bfonboard_package, decode_bfprofile_package, decode_bfshare_package,
+    PROFILE_BACKUP_EVENT_KIND, RotateKeysetRequest, bf_peer_scoped_policy_profile_to_core,
+    build_profile_backup_event, core_peer_policy_override_to_bf, create_encrypted_profile_backup,
+    create_keyset, decode_bfonboard_package, decode_bfprofile_package, decode_bfshare_package,
     derive_profile_id_from_share_secret, encode_bfonboard_package, encode_bfprofile_package,
-    encode_bfshare_package, parse_profile_backup_event,
+    encode_bfshare_package, parse_profile_backup_event, rotate_keyset_dealer,
 };
 use futures_util::{SinkExt, StreamExt};
 use k256::elliptic_curve::sec1::ToEncodedPoint;
@@ -55,6 +55,7 @@ pub struct ShellPaths {
     pub groups_dir: PathBuf,
     pub vault_dir: PathBuf,
     pub state_profiles_dir: PathBuf,
+    pub rotations_dir: PathBuf,
     pub config_path: PathBuf,
     pub relay_profiles_path: PathBuf,
     pub imports_dir: PathBuf,
@@ -85,6 +86,7 @@ impl ShellPaths {
             groups_dir: data_dir.join("groups"),
             vault_dir: data_dir.join("vault"),
             state_profiles_dir: state_dir.join("profiles"),
+            rotations_dir: state_dir.join("rotations"),
             config_path: config_dir.join("config.json"),
             relay_profiles_path: config_dir.join("relay-profiles.json"),
             imports_dir: data_dir.join("imports"),
@@ -104,6 +106,7 @@ impl ShellPaths {
             &self.vault_dir,
             &self.imports_dir,
             &self.state_profiles_dir,
+            &self.rotations_dir,
         ] {
             fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
         }
@@ -352,6 +355,96 @@ pub struct GeneratedKeysetDraft {
     pub shares: Vec<GeneratedShareDraft>,
     group: bifrost_core::types::GroupPackage,
     share_packages: Vec<bifrost_core::types::SharePackage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RotationWorkspaceSource {
+    pub package_path: String,
+    #[serde(default)]
+    pub package_secret_env: Option<String>,
+    #[serde(default)]
+    pub package_secret_file: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RotationTargetMode {
+    LocalReplace,
+    Bfonboard,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RotationUsageHint {
+    NewDevice,
+    RotateExistingDevice,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RotationWorkspaceTarget {
+    pub member_index: u16,
+    pub mode: RotationTargetMode,
+    pub label: String,
+    pub relays: Vec<String>,
+    #[serde(default)]
+    pub usage_hint: Option<RotationUsageHint>,
+    #[serde(default)]
+    pub replace_profile_id: Option<String>,
+    #[serde(default)]
+    pub output_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RotationWorkspaceDocument {
+    pub version: u32,
+    pub source_profile_id: String,
+    pub source_group_id: String,
+    pub source_group_public_key: String,
+    pub source_keyset_name: String,
+    pub source_threshold: u16,
+    pub source_count: u16,
+    pub next_threshold: u16,
+    pub next_count: u16,
+    pub source_packages: Vec<RotationWorkspaceSource>,
+    pub targets: Vec<RotationWorkspaceTarget>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RotationWorkspaceStatus {
+    pub workspace_path: String,
+    pub ready: bool,
+    pub source_profile_id: String,
+    pub source_group_id: String,
+    pub source_group_public_key: String,
+    pub source_threshold: u16,
+    pub next_threshold: u16,
+    pub next_count: u16,
+    pub source_packages_present: usize,
+    pub source_packages_required: usize,
+    pub local_target_member_index: Option<u16>,
+    pub local_replace_profile_id: Option<String>,
+    pub remote_target_count: usize,
+    pub missing_secret_entries: Vec<String>,
+    pub validation_errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RotationGeneratedPackage {
+    pub member_index: u16,
+    pub label: String,
+    pub profile_id: String,
+    pub usage_hint: RotationUsageHint,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RotationGenerateResult {
+    pub workspace_path: String,
+    pub source_group_id: String,
+    pub next_group_id: String,
+    pub replaced_profile_id: String,
+    pub profile: ProfileManifest,
+    pub generated_packages: Vec<RotationGeneratedPackage>,
 }
 
 pub fn load_shell_config(paths: &ShellPaths) -> Result<ShellConfig> {
@@ -1623,6 +1716,7 @@ pub fn finalize_rotation_update_import(
     paths: &ShellPaths,
     target: &ProfileManifest,
     target_payload: BfProfilePayload,
+    rotated_group: &bifrost_core::types::GroupPackage,
     rotated_payload: BfProfilePayload,
     vault_passphrase: Option<String>,
 ) -> Result<ProfileImportResult> {
@@ -1633,27 +1727,45 @@ pub fn finalize_rotation_update_import(
         bail!("rotation update did not produce a new device profile id");
     }
 
-    let import = import_profile_from_bfprofile_payload(
+    paths.ensure()?;
+    let share = bifrost_core::types::SharePackage {
+        idx: find_member_index_for_share_secret(rotated_group, &rotated_payload.device.share_secret)?,
+        seckey: hex_to_bytes32(&rotated_payload.device.share_secret)?,
+    };
+    let relay_profile_id = ensure_onboarding_relay_profile(
         paths,
-        rotated_payload,
-        Some(target.label.clone()),
         Some(target.relay_profile.clone()),
+        Some(target.label.as_str()),
+        &rotated_payload.device.relays,
+    )?;
+    let now = now_unix_secs();
+    let group_ref = store_group_package(paths, rotated_group)?;
+    let share_raw = serde_json::to_string_pretty(&SharePackageWire::from(share.clone()))
+        .context("serialize rotated share package")?;
+    let vault_record = store_secret_payload(
+        paths,
+        "share_package",
+        "rotation_update",
+        &share_raw,
         vault_passphrase,
     )?;
-
-    let ProfileImportResult::ProfileCreated {
-        profile,
-        vault_record,
-        diagnostics,
-        warnings,
-    } = import
-    else {
-        bail!("rotation update did not produce a profile");
-    };
-
-    let mut migrated = profile.clone();
+    let mut migrated = build_profile_manifest(
+        paths,
+        &rotated_payload.profile_id,
+        target.label.clone(),
+        group_ref,
+        vault_record.id.clone(),
+        relay_profile_id,
+        now,
+    );
+    migrated.policy_overrides =
+        build_policy_overrides_value(&rotated_payload.device.manual_peer_policy_overrides)?;
+    migrated.remote_policy_observations =
+        build_remote_policy_observations_value(&rotated_payload.device.remote_peer_policy_observations)?;
     migrated.runtime_options = target.runtime_options.clone();
     migrated.last_used_at = target.last_used_at;
+    fs::create_dir_all(paths.profile_state_dir(&migrated.id))
+        .with_context(|| format!("create {}", paths.profile_state_dir(&migrated.id).display()))?;
     write_profile(paths, &migrated)?;
 
     remove_profile(paths, &target.id)?;
@@ -1662,8 +1774,8 @@ pub fn finalize_rotation_update_import(
     Ok(ProfileImportResult::ProfileCreated {
         profile: migrated,
         vault_record,
-        diagnostics,
-        warnings,
+        diagnostics: None,
+        warnings: Vec::new(),
     })
 }
 
@@ -1718,9 +1830,410 @@ pub async fn apply_rotation_update_from_bfonboard_value(
         paths,
         &target,
         target_payload,
+        &connection.completion.group,
         rotated_payload,
         vault_passphrase,
     )
+}
+
+pub fn default_rotation_workspace_path(paths: &ShellPaths, source_profile_id: &str) -> PathBuf {
+    paths.rotations_dir.join(format!(
+        "{}-{}",
+        source_profile_id,
+        now_unix_secs()
+    ))
+}
+
+pub fn create_rotation_workspace(
+    paths: &ShellPaths,
+    source_profile_id: &str,
+    threshold: u16,
+    count: u16,
+    workspace_root: &Path,
+    source_package_paths: Vec<String>,
+    vault_passphrase: Option<String>,
+) -> Result<RotationWorkspaceDocument> {
+    paths.ensure()?;
+    create_keyset(CreateKeysetConfig { threshold, count })
+        .map_err(|error| anyhow!("validate rotation geometry: {error}"))?;
+
+    let source_profile = read_profile(paths, source_profile_id)?;
+    let source_payload = profile_to_package_payload(paths, source_profile_id, vault_passphrase)?;
+    let source_group = group_from_payload(&source_payload)?;
+    let source_share = share_from_payload(&source_group, &source_payload)?;
+    let source_group_id = hex::encode(get_group_id(&source_group).context("derive source group id")?);
+    let source_keyset_name = source_payload.group.keyset_name.clone();
+
+    if workspace_root.exists() {
+        bail!("rotation workspace already exists at {}", workspace_root.display());
+    }
+
+    let targets = (1..=count)
+        .map(|member_index| RotationWorkspaceTarget {
+            member_index,
+            mode: if member_index == source_share.idx {
+                RotationTargetMode::LocalReplace
+            } else {
+                RotationTargetMode::Bfonboard
+            },
+            label: if member_index == source_share.idx {
+                source_profile.label.clone()
+            } else {
+                format!("{source_keyset_name} Device {member_index}")
+            },
+            relays: source_payload.device.relays.clone(),
+            usage_hint: if member_index == source_share.idx {
+                None
+            } else {
+                Some(RotationUsageHint::RotateExistingDevice)
+            },
+            replace_profile_id: if member_index == source_share.idx {
+                Some(source_profile_id.to_string())
+            } else {
+                None
+            },
+            output_path: if member_index == source_share.idx {
+                None
+            } else {
+                Some(
+                    workspace_root
+                        .join("packages")
+                        .join(format!("member-{member_index}.bfonboard.txt"))
+                        .display()
+                        .to_string(),
+                )
+            },
+        })
+        .collect::<Vec<_>>();
+
+    let document = RotationWorkspaceDocument {
+        version: 1,
+        source_profile_id: source_profile_id.to_string(),
+        source_group_id,
+        source_group_public_key: source_payload.group.group_public_key.clone(),
+        source_keyset_name,
+        source_threshold: source_group.threshold,
+        source_count: source_group.members.len() as u16,
+        next_threshold: threshold,
+        next_count: count,
+        source_packages: source_package_paths
+            .into_iter()
+            .map(|package_path| RotationWorkspaceSource {
+                package_path,
+                package_secret_env: None,
+                package_secret_file: None,
+            })
+            .collect(),
+        targets,
+    };
+    write_rotation_workspace(workspace_root, &document)?;
+    Ok(document)
+}
+
+pub fn load_rotation_workspace(workspace_root: &Path) -> Result<RotationWorkspaceDocument> {
+    read_json(&rotation_workspace_manifest_path(workspace_root))
+}
+
+pub fn write_rotation_workspace(
+    workspace_root: &Path,
+    document: &RotationWorkspaceDocument,
+) -> Result<()> {
+    fs::create_dir_all(workspace_root)
+        .with_context(|| format!("create {}", workspace_root.display()))?;
+    fs::create_dir_all(workspace_root.join("packages"))
+        .with_context(|| format!("create {}", workspace_root.join("packages").display()))?;
+    write_json(&rotation_workspace_manifest_path(workspace_root), document)
+}
+
+pub fn inspect_rotation_workspace(
+    workspace_root: &Path,
+    document: &RotationWorkspaceDocument,
+) -> RotationWorkspaceStatus {
+    let mut validation_errors = Vec::new();
+    let mut missing_secret_entries = Vec::new();
+    let mut seen_members = HashSet::new();
+    let mut local_target_member_index = None;
+    let mut local_replace_profile_id = None;
+    let mut local_target_count = 0usize;
+    let mut remote_target_count = 0usize;
+
+    if document.version != 1 {
+        validation_errors.push(format!(
+            "unsupported rotation workspace version {}; expected 1",
+            document.version
+        ));
+    }
+    if document.next_threshold == 0 || document.next_threshold > document.next_count {
+        validation_errors.push("rotation threshold/count is invalid".to_string());
+    }
+    if document.targets.len() != document.next_count as usize {
+        validation_errors.push(format!(
+            "rotation workspace must contain exactly {} target entries",
+            document.next_count
+        ));
+    }
+    for source in &document.source_packages {
+        if source.package_secret_env.is_none() && source.package_secret_file.is_none() {
+            missing_secret_entries.push(source.package_path.clone());
+        }
+    }
+    for target in &document.targets {
+        if !seen_members.insert(target.member_index) {
+            validation_errors.push(format!(
+                "member {} is assigned more than once",
+                target.member_index
+            ));
+        }
+        if target.member_index == 0 || target.member_index > document.next_count {
+            validation_errors.push(format!(
+                "member {} is outside the configured rotated count {}",
+                target.member_index, document.next_count
+            ));
+        }
+        if target.label.trim().is_empty() {
+            validation_errors.push(format!(
+                "member {} is missing a label",
+                target.member_index
+            ));
+        }
+        if target.relays.is_empty() {
+            validation_errors.push(format!(
+                "member {} must have at least one relay",
+                target.member_index
+            ));
+        }
+        match target.mode {
+            RotationTargetMode::LocalReplace => {
+                local_target_count += 1;
+                local_target_member_index = Some(target.member_index);
+                local_replace_profile_id = target.replace_profile_id.clone();
+                if target.replace_profile_id.as_deref().unwrap_or("").trim().is_empty() {
+                    validation_errors.push(format!(
+                        "member {} must declare replace_profile_id for local_replace",
+                        target.member_index
+                    ));
+                }
+                if target.usage_hint.is_some() {
+                    validation_errors.push(format!(
+                        "member {} must not set usage_hint for local_replace",
+                        target.member_index
+                    ));
+                }
+            }
+            RotationTargetMode::Bfonboard => {
+                remote_target_count += 1;
+                if target.usage_hint.is_none() {
+                    validation_errors.push(format!(
+                        "member {} must declare usage_hint for bfonboard output",
+                        target.member_index
+                    ));
+                }
+            }
+        }
+    }
+    if local_target_count != 1 {
+        validation_errors.push("rotation workspace must contain exactly one local_replace target".to_string());
+    }
+
+    RotationWorkspaceStatus {
+        workspace_path: workspace_root.display().to_string(),
+        ready: validation_errors.is_empty()
+            && missing_secret_entries.is_empty()
+            && document.source_packages.len() >= document.source_threshold as usize,
+        source_profile_id: document.source_profile_id.clone(),
+        source_group_id: document.source_group_id.clone(),
+        source_group_public_key: document.source_group_public_key.clone(),
+        source_threshold: document.source_threshold,
+        next_threshold: document.next_threshold,
+        next_count: document.next_count,
+        source_packages_present: document.source_packages.len(),
+        source_packages_required: document.source_threshold as usize,
+        local_target_member_index,
+        local_replace_profile_id,
+        remote_target_count,
+        missing_secret_entries,
+        validation_errors,
+    }
+}
+
+pub async fn generate_rotation_workspace(
+    paths: &ShellPaths,
+    workspace_root: &Path,
+    source_passwords: Vec<String>,
+    vault_passphrase: Option<String>,
+    distribution_password: Option<String>,
+) -> Result<RotationGenerateResult> {
+    let document = load_rotation_workspace(workspace_root)?;
+    let status = inspect_rotation_workspace(workspace_root, &document);
+    if !status.validation_errors.is_empty() {
+        bail!(
+            "rotation workspace is invalid: {}",
+            status.validation_errors.join("; ")
+        );
+    }
+    if document.source_packages.len() < document.source_threshold as usize {
+        bail!(
+            "rotation requires at least {} source packages",
+            document.source_threshold
+        );
+    }
+    if source_passwords.len() != document.source_packages.len() {
+        bail!(
+            "rotation source password count {} does not match source package count {}",
+            source_passwords.len(),
+            document.source_packages.len()
+        );
+    }
+
+    let mut recovered = Vec::new();
+    for (index, source) in document.source_packages.iter().enumerate() {
+        let package_raw = fs::read_to_string(&source.package_path)
+            .with_context(|| format!("read {}", source.package_path))?;
+        let (_, payload) = preview_bfshare_recovery(&package_raw, source_passwords[index].clone(), None)
+            .await
+            .with_context(|| format!("recover {}", source.package_path))?;
+        recovered.push(payload);
+    }
+    let current_group = group_from_payload(&recovered[0])?;
+    let current_group_id = hex::encode(get_group_id(&current_group).context("derive current group id")?);
+    let current_group_pk = hex::encode(current_group.group_pk);
+    if current_group_id != document.source_group_id {
+        bail!("rotation sources do not match the workspace source group id");
+    }
+    if current_group_pk != document.source_group_public_key {
+        bail!("rotation sources do not match the workspace group public key");
+    }
+    for payload in recovered.iter().skip(1) {
+        let candidate = group_from_payload(payload)?;
+        if hex::encode(candidate.group_pk) != current_group_pk {
+            bail!("rotation sources do not share the same group public key");
+        }
+        if hex::encode(get_group_id(&candidate)?) != current_group_id {
+            bail!("rotation sources do not belong to the same current group configuration");
+        }
+    }
+
+    let shares = recovered
+        .iter()
+        .map(|payload| share_from_payload(&current_group, payload))
+        .collect::<Result<Vec<_>>>()?;
+
+    let rotated = rotate_keyset_dealer(
+        &current_group,
+        RotateKeysetRequest {
+            shares,
+            threshold: document.next_threshold,
+            count: document.next_count,
+        },
+    )
+    .map_err(|error| anyhow!("rotate keyset: {error}"))?;
+
+    let local_target = document
+        .targets
+        .iter()
+        .find(|target| target.mode == RotationTargetMode::LocalReplace)
+        .ok_or_else(|| anyhow!("rotation workspace is missing a local_replace target"))?;
+    let local_share = rotated
+        .next
+        .shares
+        .iter()
+        .find(|share| share.idx == local_target.member_index)
+        .ok_or_else(|| anyhow!("rotated share {} not found", local_target.member_index))?;
+    let replace_profile_id = local_target
+        .replace_profile_id
+        .clone()
+        .ok_or_else(|| anyhow!("local_replace target is missing replace_profile_id"))?;
+    let target = read_profile(paths, &replace_profile_id)?;
+    let target_payload = profile_to_package_payload(paths, &replace_profile_id, vault_passphrase.clone())?;
+    let local_payload = rotation_payload_from_share(
+        &document.source_keyset_name,
+        &rotated.next.group,
+        local_share,
+        local_target.label.clone(),
+        local_target.relays.clone(),
+    )?;
+    let import = finalize_rotation_update_import(
+        paths,
+        &target,
+        target_payload,
+        &rotated.next.group,
+        local_payload,
+        vault_passphrase.clone(),
+    )?;
+    let profile = match import {
+        ProfileImportResult::ProfileCreated { profile, .. } => profile,
+        _ => bail!("rotation did not produce a local profile"),
+    };
+    publish_profile_backup(paths, &profile.id, vault_passphrase.clone()).await?;
+
+    let remote_targets = document
+        .targets
+        .iter()
+        .filter(|target| target.mode == RotationTargetMode::Bfonboard)
+        .collect::<Vec<_>>();
+    let distribution_password = if remote_targets.is_empty() {
+        None
+    } else {
+        Some(distribution_password.ok_or_else(|| anyhow!("rotation requires a distribution secret to emit bfonboard packages"))?)
+    };
+
+    let packages_dir = workspace_root.join("packages");
+    fs::create_dir_all(&packages_dir)
+        .with_context(|| format!("create {}", packages_dir.display()))?;
+    let mut generated_packages = Vec::new();
+    for target in remote_targets {
+        let share = rotated
+            .next
+            .shares
+            .iter()
+            .find(|share| share.idx == target.member_index)
+            .ok_or_else(|| anyhow!("rotated share {} not found", target.member_index))?;
+        let payload = rotation_payload_from_share(
+            &document.source_keyset_name,
+            &rotated.next.group,
+            share,
+            target.label.clone(),
+            target.relays.clone(),
+        )?;
+        publish_profile_payload_backup(&payload).await?;
+        let output_path = target
+            .output_path
+            .clone()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| packages_dir.join(format!("member-{}.bfonboard.txt", target.member_index)));
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        }
+        let package = export_rotated_onboarding_package(
+            &rotated.next.group,
+            local_share,
+            share,
+            target.relays.clone(),
+            distribution_password
+                .as_ref()
+                .expect("distribution password should exist when remote targets exist")
+                .clone(),
+        )?;
+        write_package_output(Some(&output_path), &package)?;
+        generated_packages.push(RotationGeneratedPackage {
+            member_index: target.member_index,
+            label: target.label.clone(),
+            profile_id: payload.profile_id,
+            usage_hint: target
+                .usage_hint
+                .ok_or_else(|| anyhow!("rotation target {} is missing usage_hint", target.member_index))?,
+            path: output_path.display().to_string(),
+        });
+    }
+
+    Ok(RotationGenerateResult {
+        workspace_path: workspace_root.display().to_string(),
+        source_group_id: document.source_group_id,
+        next_group_id: hex::encode(rotated.next_group_id),
+        replaced_profile_id: replace_profile_id,
+        profile,
+        generated_packages,
+    })
 }
 
 pub(crate) fn import_profile_from_bfprofile_payload(
@@ -1914,6 +2427,36 @@ pub fn export_generated_onboarding_package(
     .context("encode bfonboard package")
 }
 
+fn export_rotated_onboarding_package(
+    group: &bifrost_core::types::GroupPackage,
+    local_share: &bifrost_core::types::SharePackage,
+    target_share: &bifrost_core::types::SharePackage,
+    relays: Vec<String>,
+    package_password: String,
+) -> Result<String> {
+    if relays.is_empty() {
+        bail!("at least one relay is required");
+    }
+    if local_share.idx == target_share.idx {
+        bail!("rotation onboarding target must differ from the local replacement member");
+    }
+    if !group.members.iter().any(|member| member.idx == local_share.idx) {
+        bail!("rotated group is missing the local replacement member");
+    }
+    if !group.members.iter().any(|member| member.idx == target_share.idx) {
+        bail!("rotated group is missing the target member");
+    }
+    encode_bfonboard_package(
+        &BfOnboardPayload {
+            share_secret: hex::encode(target_share.seckey),
+            relays,
+            peer_pk: derive_member_pubkey_hex(local_share.seckey)?,
+        },
+        &package_password,
+    )
+    .context("encode rotated bfonboard package")
+}
+
 fn profile_to_package_payload(
     paths: &ShellPaths,
     profile_id: &str,
@@ -1954,6 +2497,115 @@ fn profile_to_package_payload(
                 .collect(),
         },
     })
+}
+
+fn group_from_payload(payload: &BfProfilePayload) -> Result<bifrost_core::types::GroupPackage> {
+    let members = payload
+        .group
+        .members
+        .iter()
+        .map(|member| {
+            let mut pubkey = [0u8; 33];
+            pubkey[0] = 0x02;
+            pubkey[1..].copy_from_slice(&hex::decode(&member.share_public_key)?);
+            Ok(bifrost_core::types::MemberPackage {
+                idx: member.index,
+                pubkey,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(bifrost_core::types::GroupPackage {
+        group_pk: hex::decode(&payload.group.group_public_key)?
+            .try_into()
+            .map_err(|_| anyhow!("invalid group public key"))?,
+        threshold: payload.group.threshold,
+        members,
+    })
+}
+
+fn share_from_payload(
+    group: &bifrost_core::types::GroupPackage,
+    payload: &BfProfilePayload,
+) -> Result<bifrost_core::types::SharePackage> {
+    let share_secret = hex::decode(&payload.device.share_secret)?;
+    let seckey: [u8; 32] = share_secret
+        .try_into()
+        .map_err(|_| anyhow!("invalid share secret"))?;
+    let share_public_key = hex::encode(
+        k256::SecretKey::from_slice(&seckey)
+            .map_err(|error| anyhow!("invalid share secret: {error}"))?
+            .public_key()
+            .to_sec1_bytes(),
+    );
+    let xonly = share_public_key
+        .strip_prefix("02")
+        .or_else(|| share_public_key.strip_prefix("03"))
+        .unwrap_or(&share_public_key)
+        .to_string();
+    let member = group
+        .members
+        .iter()
+        .find(|member| hex::encode(&member.pubkey[1..]) == xonly)
+        .ok_or_else(|| anyhow!("share secret does not match any member in the recovered group"))?;
+    Ok(bifrost_core::types::SharePackage {
+        idx: member.idx,
+        seckey,
+    })
+}
+
+fn rotation_payload_from_share(
+    keyset_name: &str,
+    group: &bifrost_core::types::GroupPackage,
+    share: &bifrost_core::types::SharePackage,
+    label: String,
+    relays: Vec<String>,
+) -> Result<BfProfilePayload> {
+    let share_secret = hex::encode(share.seckey);
+    let local_pubkey = derive_member_pubkey_hex(share.seckey)?;
+    Ok(BfProfilePayload {
+        profile_id: derive_profile_id_for_share_secret(&share_secret)?,
+        version: 1,
+        device: BfProfileDevice {
+            name: label,
+            share_secret,
+            manual_peer_policy_overrides: group
+                .members
+                .iter()
+                .map(|member| hex::encode(&member.pubkey[1..]))
+                .filter(|pubkey| pubkey != &local_pubkey)
+                .map(|pubkey| BfManualPeerPolicyOverride {
+                    pubkey,
+                    policy: core_peer_policy_override_to_bf(&PeerPolicyOverride::from_peer_policy(
+                        &PeerPolicy::default(),
+                    )),
+                })
+                .collect(),
+            remote_peer_policy_observations: Vec::new(),
+            relays,
+        },
+        group: BfProfileGroup {
+            keyset_name: keyset_name.to_string(),
+            group_public_key: hex::encode(group.group_pk),
+            threshold: group.threshold,
+            total_count: group.members.len() as u16,
+            members: group
+                .members
+                .iter()
+                .map(|member| BfGroupMember {
+                    index: member.idx,
+                    share_public_key: hex::encode(&member.pubkey[1..]),
+                })
+                .collect(),
+        },
+    })
+}
+
+async fn publish_profile_payload_backup(payload: &BfProfilePayload) -> Result<()> {
+    let backup = create_encrypted_profile_backup(payload).context("build encrypted backup")?;
+    let event = build_profile_backup_event(&payload.device.share_secret, &backup, None)
+        .context("build backup event")?;
+    publish_nostr_event(&payload.device.relays, &event).await
 }
 
 fn preview_from_profile_payload(
@@ -2123,6 +2775,10 @@ fn write_package_output(out_path: Option<&Path>, package: &str) -> Result<()> {
         fs::write(path, package).with_context(|| format!("write {}", path.display()))?;
     }
     Ok(())
+}
+
+fn rotation_workspace_manifest_path(workspace_root: &Path) -> PathBuf {
+    workspace_root.join("rotation.json")
 }
 
 fn hex_to_bytes32(value: &str) -> Result<[u8; 32]> {
@@ -2887,6 +3543,7 @@ mod tests {
                 .join("igloo-shell")
                 .join("relay-profiles.json"),
             imports_dir: root.join("data").join("igloo-shell").join("imports"),
+            rotations_dir: root.join("state").join("igloo-shell").join("rotations"),
         }
     }
 

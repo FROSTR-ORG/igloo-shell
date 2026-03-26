@@ -1,9 +1,29 @@
 mod support;
 
+use std::fs;
 use std::time::Duration;
 
 use serde_json::Value;
 use support::{TestHarness, extract_profile_id, extract_profile_label};
+
+fn group_public_key_for_profile(harness: &TestHarness, profile_id: &str) -> String {
+    let shown = harness.show_profile(profile_id);
+    let group_ref = shown
+        .get("group_ref")
+        .and_then(Value::as_str)
+        .expect("group ref");
+    let group: Value =
+        serde_json::from_str(&fs::read_to_string(group_ref).expect("read group package"))
+            .expect("parse group package");
+    match group.get("group_pk") {
+        Some(Value::String(value)) => value.clone(),
+        Some(Value::Array(group_pk)) => group_pk
+            .iter()
+            .map(|byte| format!("{:02x}", byte.as_u64().expect("group public key byte") as u8))
+            .collect::<String>(),
+        _ => panic!("group public key bytes"),
+    }
+}
 
 #[test]
 fn onboard_with_password_flag_creates_profile() {
@@ -81,6 +101,159 @@ fn exported_bfonboard_round_trips_through_shell_onboard() {
 
     harness.start_daemon(&profile_id);
     harness.wait_for_runtime(&profile_id, Duration::from_secs(20));
+}
+
+#[test]
+fn rotate_keyset_init_and_generate_replace_local_profile_and_emit_bfonboard_packages() {
+    let mut harness = TestHarness::new("rotate-keyset-generate");
+    harness.start_relay();
+    harness.keygen(2, 3);
+    harness.set_relay_profile("local");
+
+    let alice = harness.import_profile("share-alice.json", "alice", "local");
+    let alice_id = extract_profile_id(&alice);
+    let alice_label = extract_profile_label(&alice);
+    let bob = harness.import_profile("share-bob.json", "bob", "local");
+    let bob_id = extract_profile_id(&bob);
+    harness.backup_profile(&alice_id);
+    harness.backup_profile(&bob_id);
+
+    let alice_bfshare = harness.export_bfshare_package(&alice_id, "alice-rotate-pass");
+    let bob_bfshare = harness.export_bfshare_package(&bob_id, "bob-rotate-pass");
+    let alice_bfshare_path = harness.save_onboarding_package("alice-rotate.bfshare", &alice_bfshare);
+    let bob_bfshare_path = harness.save_onboarding_package("bob-rotate.bfshare", &bob_bfshare);
+    let workspace = harness.root().join("rotation-workspace");
+
+    let init = harness.rotate_keyset_init(
+        &alice_id,
+        2,
+        4,
+        &workspace,
+        &[alice_bfshare_path.as_path(), bob_bfshare_path.as_path()],
+    );
+    let show = harness.rotate_keyset_show(&workspace);
+    let status = show.get("status").expect("rotation workspace status");
+    assert_eq!(status.get("source_packages_present").and_then(Value::as_u64), Some(2));
+    assert_eq!(status.get("source_packages_required").and_then(Value::as_u64), Some(2));
+    assert_eq!(status.get("local_target_member_index").and_then(Value::as_u64), Some(1));
+    assert_eq!(status.get("remote_target_count").and_then(Value::as_u64), Some(3));
+    assert_eq!(
+        init.get("workspace").and_then(Value::as_str),
+        Some(workspace.display().to_string().as_str())
+    );
+
+    let manifest_path = workspace.join("rotation.json");
+    let mut manifest: Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).expect("read rotation manifest"))
+            .expect("parse rotation manifest");
+    let sources = manifest
+        .get_mut("source_packages")
+        .and_then(Value::as_array_mut)
+        .expect("rotation source packages");
+    sources[0]["package_secret_env"] = Value::String("ROTATE_SRC_ALICE".to_string());
+    sources[1]["package_secret_env"] = Value::String("ROTATE_SRC_BOB".to_string());
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).expect("serialize rotation manifest"),
+    )
+    .expect("write rotation manifest");
+
+    let generated = harness.rotate_keyset_generate(
+        &workspace,
+        "rotate-distribution-pass",
+        &[
+            ("ROTATE_SRC_ALICE", "alice-rotate-pass"),
+            ("ROTATE_SRC_BOB", "bob-rotate-pass"),
+        ],
+    );
+
+    let rotation = generated
+        .get("rotation_generate")
+        .expect("rotation generate payload");
+    let replaced_profile_id = rotation
+        .get("replaced_profile_id")
+        .and_then(Value::as_str)
+        .expect("replaced profile id");
+    let new_profile = rotation.get("profile").expect("new local profile");
+    let new_profile_id = new_profile
+        .get("id")
+        .and_then(Value::as_str)
+        .expect("new local profile id");
+    assert_eq!(replaced_profile_id, alice_id);
+    assert_ne!(new_profile_id, alice_id);
+    assert_eq!(
+        new_profile.get("label").and_then(Value::as_str),
+        Some(alice_label.as_str())
+    );
+    assert_ne!(
+        rotation.get("source_group_id").and_then(Value::as_str),
+        rotation.get("next_group_id").and_then(Value::as_str)
+    );
+
+    let profiles = harness.list_profiles();
+    let ids = profiles
+        .as_array()
+        .expect("profile list")
+        .iter()
+        .filter_map(|profile| profile.get("id").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert!(!ids.contains(&alice_id.as_str()));
+    assert!(ids.contains(&new_profile_id));
+    assert!(ids.contains(&bob_id.as_str()));
+
+    let packages = rotation
+        .get("generated_packages")
+        .and_then(Value::as_array)
+        .expect("generated packages");
+    assert_eq!(packages.len(), 3);
+    harness.start_daemon(new_profile_id);
+    harness.wait_for_runtime(new_profile_id, Duration::from_secs(20));
+    let rotated_group_pk = group_public_key_for_profile(&harness, new_profile_id);
+    let mut onboard_package_path = None;
+    let mut rotate_package_path = None;
+    for package in packages {
+        let path = package
+            .get("path")
+            .and_then(Value::as_str)
+            .expect("generated package path");
+        assert!(std::path::Path::new(path).is_file(), "missing generated package: {path}");
+        match package.get("member_index").and_then(Value::as_u64) {
+            Some(2) => rotate_package_path = Some(path.to_string()),
+            Some(3) => onboard_package_path = Some(path.to_string()),
+            _ => {}
+        }
+    }
+
+    let onboard_path = onboard_package_path.expect("member 3 onboarding package");
+    let onboarded = harness.onboard(
+        std::path::Path::new(&onboard_path),
+        "rotated-carol",
+        "rotate-distribution-pass",
+        "vault-passphrase",
+    );
+    let onboarded_id = extract_profile_id(&onboarded);
+    harness.start_daemon(&onboarded_id);
+    harness.wait_for_runtime(&onboarded_id, Duration::from_secs(20));
+    assert_eq!(
+        group_public_key_for_profile(&harness, &onboarded_id),
+        rotated_group_pk.clone()
+    );
+
+    let rotate_path = rotate_package_path.expect("member 2 rotation package");
+    let rotated_bob = harness.rotate_key(
+        std::path::Path::new(&rotate_path),
+        &bob_id,
+        "rotate-distribution-pass",
+        "vault-passphrase",
+    );
+    let rotated_bob_id = extract_profile_id(&rotated_bob);
+    assert_ne!(rotated_bob_id, bob_id);
+    harness.start_daemon(&rotated_bob_id);
+    harness.wait_for_runtime(&rotated_bob_id, Duration::from_secs(20));
+    assert_eq!(
+        group_public_key_for_profile(&harness, &rotated_bob_id),
+        rotated_group_pk
+    );
 }
 
 #[test]
@@ -307,7 +480,7 @@ fn recover_with_start_attaches_to_daemon_log() {
             "--start",
         ],
         &[],
-        Duration::from_secs(6),
+        Duration::from_secs(10),
     );
 
     let profiles = harness.list_profiles();

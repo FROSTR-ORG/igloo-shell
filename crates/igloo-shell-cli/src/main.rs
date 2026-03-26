@@ -1,7 +1,7 @@
 use std::fs;
 use std::fs::File;
 use std::io::{IsTerminal, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -12,13 +12,16 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, read};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use igloo_shell_core::shell::{
     DaemonMetadata, PolicyDirection, PolicyMethod, RelayProfile, SetupRequest, ShellCheckKind,
-    ShellPaths, add_relays, apply_rotation_update_from_bfonboard_value, check_profile_runtime,
-    clear_profile_peer_policy, create_generated_keyset_draft, daemon_log_path,
-    daemon_runtime_query, doctor_profile, export_generated_onboarding_package, export_profile,
-    export_profile_as_bfonboard, export_profile_as_bfprofile, export_profile_as_bfshare,
+    RotationWorkspaceDocument, ShellPaths, add_relays,
+    apply_rotation_update_from_bfonboard_value, check_profile_runtime, clear_profile_peer_policy,
+    create_generated_keyset_draft, create_rotation_workspace, daemon_log_path,
+    daemon_runtime_query, default_rotation_workspace_path, doctor_profile,
+    export_generated_onboarding_package, export_profile, export_profile_as_bfonboard,
+    export_profile_as_bfprofile, export_profile_as_bfshare, generate_rotation_workspace,
     import_generated_share, import_profile_from_bfprofile_value, import_profile_from_files,
-    import_profile_from_onboarding_value, list_profiles, load_relay_profiles, load_shell_config,
-    publish_profile_backup, read_daemon_metadata, read_profile, recover_profile_from_bfshare_value,
+    import_profile_from_onboarding_value, inspect_rotation_workspace, list_profiles,
+    load_relay_profiles, load_rotation_workspace, load_shell_config, publish_profile_backup,
+    read_daemon_metadata, read_profile, recover_profile_from_bfshare_value,
     remove_daemon_metadata, remove_profile, remove_relays, replace_relay_profile,
     resolve_profile_runtime, run_setup, set_default_relay_profile,
     set_profile_default_policy_override, set_profile_peer_policy_override, start_profile_daemon,
@@ -53,6 +56,10 @@ enum Commands {
     Recover(RecoverArgs),
     Onboard(OnboardArgs),
     RotateKey(RotateKeyArgs),
+    RotateKeyset {
+        #[command(subcommand)]
+        command: RotateKeysetCommands,
+    },
     Keygen(KeygenArgs),
     Setup(SetupArgs),
     Profile {
@@ -111,6 +118,13 @@ enum ProfileCommands {
     Doctor {
         profile_id: String,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum RotateKeysetCommands {
+    Init(RotateKeysetInitArgs),
+    Show(RotateKeysetShowArgs),
+    Generate(RotateKeysetGenerateArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -328,6 +342,54 @@ struct RotateKeyArgs {
 }
 
 #[derive(Debug, Args)]
+struct RotateKeysetInitArgs {
+    #[arg(long)]
+    profile: String,
+    #[arg(long)]
+    threshold: u16,
+    #[arg(long)]
+    count: u16,
+    #[arg(long)]
+    workspace: Option<String>,
+    #[arg(long = "source-bfshare")]
+    source_bfshares: Vec<String>,
+    #[arg(long, conflicts_with = "vault_secret_file")]
+    vault_secret: Option<String>,
+    #[arg(long, conflicts_with = "vault_secret")]
+    vault_secret_file: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct RotateKeysetShowArgs {
+    #[arg(long)]
+    workspace: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct RotateKeysetGenerateArgs {
+    #[arg(long)]
+    workspace: String,
+    #[arg(long, conflicts_with = "vault_secret_file")]
+    vault_secret: Option<String>,
+    #[arg(long, conflicts_with = "vault_secret")]
+    vault_secret_file: Option<String>,
+    #[arg(long, conflicts_with = "distribution_secret_file")]
+    distribution_secret: Option<String>,
+    #[arg(long, conflicts_with = "distribution_secret")]
+    distribution_secret_file: Option<String>,
+    #[arg(long, conflicts_with = "daemon", conflicts_with = "json")]
+    start: bool,
+    #[arg(long, conflicts_with = "start")]
+    daemon: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
 struct KeygenArgs {
     #[arg(long)]
     keyset_name: Option<String>,
@@ -488,6 +550,7 @@ async fn main() -> Result<()> {
         Commands::Recover(args) => handle_recover(&paths, args).await?,
         Commands::Onboard(args) => handle_onboard(&paths, args).await?,
         Commands::RotateKey(args) => handle_rotate_key(&paths, args).await?,
+        Commands::RotateKeyset { command } => handle_rotate_keyset(&paths, command).await?,
         Commands::Keygen(args) => handle_keygen(&paths, args).await?,
         Commands::Setup(args) => handle_setup(&paths, args).await?,
         Commands::Profile { command } => handle_profile(&paths, command).await?,
@@ -502,6 +565,14 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn handle_rotate_keyset(paths: &ShellPaths, command: RotateKeysetCommands) -> Result<()> {
+    match command {
+        RotateKeysetCommands::Init(args) => handle_rotate_keyset_init(paths, args),
+        RotateKeysetCommands::Show(args) => handle_rotate_keyset_show(paths, args),
+        RotateKeysetCommands::Generate(args) => handle_rotate_keyset_generate(paths, args).await,
+    }
 }
 
 async fn handle_profile(paths: &ShellPaths, command: ProfileCommands) -> Result<()> {
@@ -849,6 +920,153 @@ async fn handle_rotate_key(paths: &ShellPaths, args: RotateKeyArgs) -> Result<()
         return Ok(());
     }
     print_profile_next_commands(&new_profile_id);
+    Ok(())
+}
+
+fn handle_rotate_keyset_init(paths: &ShellPaths, args: RotateKeysetInitArgs) -> Result<()> {
+    let stdin_is_terminal = std::io::stdin().is_terminal();
+    let vault_secret = resolve_secret_source_with(
+        args.vault_secret,
+        args.vault_secret_file,
+        stdin_is_terminal,
+        "vault-secret",
+        "rotate-keyset init requires vault secret input; use --vault-secret / --vault-secret-file, or run on a TTY",
+        prompt_load_vault_secret,
+    )?;
+    let workspace_root = args
+        .workspace
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_rotation_workspace_path(paths, &args.profile));
+    let document = create_rotation_workspace(
+        paths,
+        &args.profile,
+        args.threshold,
+        args.count,
+        &workspace_root,
+        args.source_bfshares,
+        Some(vault_secret),
+    )?;
+    let status = inspect_rotation_workspace(&workspace_root, &document);
+    if args.json {
+        return print_json(&serde_json::json!({
+            "workspace": workspace_root.display().to_string(),
+            "document": document,
+            "status": status,
+        }));
+    }
+
+    println!(
+        "Rotation workspace created at {}.",
+        workspace_root.display()
+    );
+    print_rotation_workspace_status(&status);
+    Ok(())
+}
+
+fn handle_rotate_keyset_show(paths: &ShellPaths, args: RotateKeysetShowArgs) -> Result<()> {
+    let _ = paths;
+    let workspace_root = PathBuf::from(args.workspace);
+    let document = load_rotation_workspace(&workspace_root)?;
+    let status = inspect_rotation_workspace(&workspace_root, &document);
+    if args.json {
+        return print_json(&serde_json::json!({
+            "workspace": workspace_root.display().to_string(),
+            "document": document,
+            "status": status,
+        }));
+    }
+
+    print_rotation_workspace_status(&status);
+    Ok(())
+}
+
+async fn handle_rotate_keyset_generate(
+    paths: &ShellPaths,
+    args: RotateKeysetGenerateArgs,
+) -> Result<()> {
+    let workspace_root = PathBuf::from(&args.workspace);
+    let document = load_rotation_workspace(&workspace_root)?;
+    let stdin_is_terminal = std::io::stdin().is_terminal();
+    let vault_secret = resolve_secret_source_with(
+        args.vault_secret,
+        args.vault_secret_file,
+        stdin_is_terminal,
+        "vault-secret",
+        "rotate-keyset generate requires vault secret input; use --vault-secret / --vault-secret-file, or run on a TTY",
+        prompt_load_vault_secret,
+    )?;
+    let source_passwords = resolve_rotation_source_passwords(&document, stdin_is_terminal)?;
+    let needs_distribution_secret = document
+        .targets
+        .iter()
+        .any(|target| target.mode != igloo_shell_core::shell::RotationTargetMode::LocalReplace);
+    let distribution_secret = if needs_distribution_secret {
+        Some(resolve_secret_source_with(
+            args.distribution_secret,
+            args.distribution_secret_file,
+            stdin_is_terminal,
+            "distribution-secret",
+            "rotate-keyset generate requires onboarding package secret input; use --distribution-secret / --distribution-secret-file, or run on a TTY",
+            prompt_distribution_secret,
+        )?)
+    } else {
+        None
+    };
+
+    let result = generate_rotation_workspace(
+        paths,
+        &workspace_root,
+        source_passwords,
+        Some(vault_secret.clone()),
+        distribution_secret,
+    )
+    .await?;
+
+    let daemon = if args.daemon {
+        let (metadata, existing) =
+            ensure_profile_daemon(paths, &result.profile.id, Some(vault_secret.clone())).await?;
+        Some((metadata, existing))
+    } else {
+        None
+    };
+
+    if args.json {
+        return print_json(&serde_json::json!({
+            "rotation_generate": result,
+            "daemon": daemon.as_ref().map(|(metadata, existing)| serde_json::json!({
+                "started": !existing,
+                "metadata": metadata,
+            })),
+            "next": {
+                "load": format!("igloo-shell profile load {}", result.profile.id),
+                "start": format!("igloo-shell profile load {} --start", result.profile.id),
+                "daemon": format!("igloo-shell profile load {} --daemon", result.profile.id),
+            }
+        }));
+    }
+
+    if args.start {
+        println!(
+            "Rotation generated. Replaced profile {} with {}.",
+            short_profile_id(&result.replaced_profile_id),
+            short_profile_id(&result.profile.id)
+        );
+        print_rotation_generated_packages(&result);
+        return start_profile_attached(paths, &result.profile, vault_secret).await;
+    }
+
+    print_profile_ready_summary("Rotation generation complete.", &result.profile);
+    println!(
+        "Replaced profile {} with {}.",
+        short_profile_id(&result.replaced_profile_id),
+        short_profile_id(&result.profile.id)
+    );
+    print_rotation_generated_packages(&result);
+    if let Some((metadata, existing)) = daemon {
+        print_daemon_started_summary(&result.profile, &metadata, existing);
+        return Ok(());
+    }
+    print_profile_next_commands(&result.profile.id);
     Ok(())
 }
 
@@ -1544,6 +1762,30 @@ where
     }
 }
 
+fn resolve_rotation_source_passwords(
+    document: &RotationWorkspaceDocument,
+    stdin_is_terminal: bool,
+) -> Result<Vec<String>> {
+    document
+        .source_packages
+        .iter()
+        .map(|source| {
+            let package_secret = load_secret_from_env(source.package_secret_env.clone())?;
+            resolve_secret_source_with(
+                package_secret,
+                source.package_secret_file.clone(),
+                stdin_is_terminal,
+                "package-secret",
+                &format!(
+                    "rotate-keyset generate requires a source package secret for {}; set package_secret_env/package_secret_file in the workspace or run on a TTY",
+                    source.package_path
+                ),
+                || prompt_rotation_source_package_secret(&source.package_path),
+            )
+        })
+        .collect()
+}
+
 fn read_package_or_inline(package_or_path: &str) -> Result<String> {
     let path = Path::new(package_or_path);
     if path.exists() {
@@ -1664,6 +1906,17 @@ fn prompt_distribution_secret() -> Result<String> {
             "Type the onboarding secret that should encrypt those packages.",
         ],
         "Onboarding package secret",
+    )
+}
+
+fn prompt_rotation_source_package_secret(package_path: &str) -> Result<String> {
+    prompt_hidden_secret(
+        &[
+            "This rotation source package is encrypted.",
+            "Type the package secret now to continue the rotation workflow.",
+            package_path,
+        ],
+        "Package secret",
     )
 }
 
@@ -1816,6 +2069,67 @@ fn print_profile_next_commands(profile_id: &str) {
     println!("  igloo-shell profile load {profile_id} --start");
     println!("  igloo-shell profile load {profile_id} --daemon");
     println!("  igloo-shell daemon status --profile {profile_id}");
+}
+
+fn print_rotation_workspace_status(status: &igloo_shell_core::shell::RotationWorkspaceStatus) {
+    println!("Rotation workspace: {}", status.workspace_path);
+    println!(
+        "Source profile: {} | source group: {}",
+        status.source_profile_id,
+        short_profile_id(&status.source_group_id)
+    );
+    println!(
+        "Sources: {}/{} | targets: {} | remote packages: {}",
+        status.source_packages_present,
+        status.source_packages_required,
+        status.next_count,
+        status.remote_target_count
+    );
+    if let Some(member_index) = status.local_target_member_index {
+        println!("Local replacement member: {member_index}");
+    }
+    if let Some(profile_id) = &status.local_replace_profile_id {
+        println!("Local replace profile: {}", short_profile_id(profile_id));
+    }
+    if status.ready {
+        println!("Workspace is ready for generation.");
+    } else {
+        println!("Workspace is not ready yet.");
+    }
+    if !status.missing_secret_entries.is_empty() {
+        println!("Missing source package secret references:");
+        for entry in &status.missing_secret_entries {
+            println!("  {entry}");
+        }
+    }
+    if !status.validation_errors.is_empty() {
+        println!("Validation errors:");
+        for error in &status.validation_errors {
+            println!("  {error}");
+        }
+    }
+}
+
+fn print_rotation_generated_packages(result: &igloo_shell_core::shell::RotationGenerateResult) {
+    if result.generated_packages.is_empty() {
+        println!("No remote onboarding packages were generated.");
+        return;
+    }
+    println!("Generated onboarding packages:");
+    for package in &result.generated_packages {
+        println!(
+            "  member {} | {} | {} | {}",
+            package.member_index,
+            package.label,
+            match package.usage_hint {
+                igloo_shell_core::shell::RotationUsageHint::NewDevice => "new_device",
+                igloo_shell_core::shell::RotationUsageHint::RotateExistingDevice => {
+                    "rotate_existing_device"
+                }
+            },
+            package.path
+        );
+    }
 }
 
 fn print_running_profile_commands(profile_id: &str) {
@@ -2330,6 +2644,107 @@ mod tests {
             "invite",
             "--vault-secret",
             "vault",
+            "--start",
+            "--json",
+        ])
+        .expect_err("conflicting flags should fail");
+        assert!(err.to_string().contains("--start"));
+    }
+
+    #[test]
+    fn rotate_keyset_init_cli_parses() {
+        let cli = Cli::try_parse_from([
+            "igloo-shell",
+            "rotate-keyset",
+            "init",
+            "--profile",
+            "source-profile",
+            "--threshold",
+            "2",
+            "--count",
+            "4",
+            "--workspace",
+            "/tmp/rotation-workspace",
+            "--source-bfshare",
+            "/tmp/alice.bfshare",
+            "--vault-secret",
+            "vault",
+            "--json",
+        ])
+        .expect("rotate-keyset init should parse");
+        match cli.command {
+            super::Commands::RotateKeyset { command } => match command {
+                super::RotateKeysetCommands::Init(args) => {
+                    assert_eq!(args.profile, "source-profile");
+                    assert_eq!(args.threshold, 2);
+                    assert_eq!(args.count, 4);
+                    assert_eq!(args.source_bfshares.len(), 1);
+                }
+                other => panic!("unexpected rotate-keyset command: {other:?}"),
+            },
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rotate_keyset_show_cli_parses() {
+        let cli = Cli::try_parse_from([
+            "igloo-shell",
+            "rotate-keyset",
+            "show",
+            "--workspace",
+            "/tmp/rotation-workspace",
+            "--json",
+        ])
+        .expect("rotate-keyset show should parse");
+        match cli.command {
+            super::Commands::RotateKeyset { command } => match command {
+                super::RotateKeysetCommands::Show(args) => {
+                    assert_eq!(args.workspace, "/tmp/rotation-workspace");
+                    assert!(args.json);
+                }
+                other => panic!("unexpected rotate-keyset command: {other:?}"),
+            },
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rotate_keyset_generate_cli_accepts_start_flag() {
+        let cli = Cli::try_parse_from([
+            "igloo-shell",
+            "rotate-keyset",
+            "generate",
+            "--workspace",
+            "/tmp/rotation-workspace",
+            "--vault-secret",
+            "vault",
+            "--distribution-secret",
+            "dist",
+            "--start",
+        ])
+        .expect("rotate-keyset generate should parse");
+        match cli.command {
+            super::Commands::RotateKeyset { command } => match command {
+                super::RotateKeysetCommands::Generate(args) => assert!(args.start),
+                other => panic!("unexpected rotate-keyset command: {other:?}"),
+            },
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rotate_keyset_generate_rejects_start_with_json() {
+        let err = Cli::try_parse_from([
+            "igloo-shell",
+            "rotate-keyset",
+            "generate",
+            "--workspace",
+            "/tmp/rotation-workspace",
+            "--vault-secret",
+            "vault",
+            "--distribution-secret",
+            "dist",
             "--start",
             "--json",
         ])
