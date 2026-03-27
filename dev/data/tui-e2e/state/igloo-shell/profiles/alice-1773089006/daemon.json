@@ -1,8 +1,0 @@
-{
-  "profile_id": "alice-1773089006",
-  "pid": 3115231,
-  "socket_path": "/tmp/igloo-shell-f33ac4d9c107.sock",
-  "token": "daemon-alice-1773089006-1773089014",
-  "log_path": "/home/cscott/Repos/frostr/frostr-infra/repos/igloo-shell/dev/data/tui-e2e/state/igloo-shell/profiles/alice-1773089006/daemon.log",
-  "started_at": 1773089014
-}

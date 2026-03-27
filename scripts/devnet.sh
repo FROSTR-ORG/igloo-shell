@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIFROST_MANIFEST="${ROOT_DIR}/../bifrost-rs/Cargo.toml"
-WORK_DIR="${ROOT_DIR}/dev/data/devnet"
+WORK_DIR="${IGLOO_SHELL_DEVNET_DIR:-${ROOT_DIR}/.tmp/devnet}"
 XDG_CONFIG_HOME="${WORK_DIR}/config"
 XDG_DATA_HOME="${WORK_DIR}/data"
 XDG_STATE_HOME="${WORK_DIR}/state"
@@ -29,6 +29,9 @@ Commands:
   stop               Stop managed profile daemons + relay
   status             Show relay and daemon status
   smoke              Run a managed-profile smoke flow and stop everything
+
+Environment:
+  IGLOO_SHELL_DEVNET_DIR   Override the generated devnet working directory
 USAGE
 }
 

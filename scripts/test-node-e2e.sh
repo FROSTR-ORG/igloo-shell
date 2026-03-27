@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORK_DIR="${ROOT_DIR}/dev/data/devnet"
+WORK_DIR="${IGLOO_SHELL_DEVNET_DIR:-${ROOT_DIR}/.tmp/devnet}"
 XDG_CONFIG_HOME="${WORK_DIR}/config"
 XDG_DATA_HOME="${WORK_DIR}/data"
 XDG_STATE_HOME="${WORK_DIR}/state"

@@ -1,7 +1,0 @@
-{
-  "schema_version": 1,
-  "default_relay_profile_id": null,
-  "last_used_profile_id": "carol-1773089007",
-  "keyring_preference": "prefer_os_keyring",
-  "fallback_unlock_mode": "passphrase"
-}

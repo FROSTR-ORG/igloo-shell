@@ -10,6 +10,10 @@ target/
 .env.*
 local/
 scratch/
+.tmp/
+dev/data/devnet/
+dev/data/managed-e2e-full/
+dev/data/tui-e2e/
 
 # Editor/OS noise
 .DS_Store
