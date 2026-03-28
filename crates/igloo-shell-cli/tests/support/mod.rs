@@ -207,6 +207,8 @@ impl TestHarness {
                 "keygen",
                 "--out-dir",
                 path_arg(&material_dir),
+                "--group-name",
+                "Test Group",
                 "--threshold",
                 &threshold.to_string(),
                 "--count",
@@ -846,22 +848,20 @@ fn ensure_devtools_bin() -> PathBuf {
             .to_path_buf();
         let bifrost_root = infra_root.join("repos/bifrost-rs");
         let bin = bifrost_root.join("target/debug/bifrost-devtools");
-        if !bin.is_file() {
-            let status = Command::new("cargo")
-                .args([
-                    "build",
-                    "--manifest-path",
-                    path_arg(&bifrost_root.join("Cargo.toml")),
-                    "-p",
-                    "bifrost-devtools",
-                    "--bin",
-                    "bifrost-devtools",
-                    "--offline",
-                ])
-                .status()
-                .expect("build bifrost-devtools");
-            assert!(status.success(), "failed to build bifrost-devtools");
-        }
+        let status = Command::new("cargo")
+            .args([
+                "build",
+                "--manifest-path",
+                path_arg(&bifrost_root.join("Cargo.toml")),
+                "-p",
+                "bifrost-devtools",
+                "--bin",
+                "bifrost-devtools",
+                "--offline",
+            ])
+            .status()
+            .expect("build bifrost-devtools");
+        assert!(status.success(), "failed to build bifrost-devtools");
         bin
     })
     .clone()

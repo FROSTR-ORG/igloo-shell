@@ -720,7 +720,7 @@ fn keygen_non_json_prints_artifact_summary_and_exits() {
 
     let result = harness.run(&[
         "keygen",
-        "--keyset-name",
+        "--group-name",
         "demo-keyset",
         "--threshold",
         "2",

@@ -23,8 +23,7 @@ use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use frostr_utils::{
     BfManualPeerPolicyOverride, BfOnboardPayload, BfProfileDevice, BfProfilePayload,
-    BfRemotePeerPolicyObservation, BfSharePayload, CreateKeysetConfig,
-    PROFILE_BACKUP_EVENT_KIND, RotateKeysetRequest, bf_peer_scoped_policy_profile_to_core,
+    BfSharePayload, CreateKeysetConfig, PROFILE_BACKUP_EVENT_KIND, RotateKeysetRequest,
     build_profile_backup_event, core_peer_policy_override_to_bf, create_encrypted_profile_backup,
     create_keyset, decode_bfonboard_package, decode_bfprofile_package, decode_bfshare_package,
     derive_profile_id_from_share_secret, encode_bfonboard_package, encode_bfprofile_package,
@@ -194,8 +193,6 @@ pub struct ProfileManifest {
     pub runtime_options: Value,
     #[serde(default)]
     pub policy_overrides: Value,
-    #[serde(default)]
-    pub remote_policy_observations: Value,
     pub state_path: String,
     pub daemon_socket_path: String,
     pub created_at: u64,
@@ -348,7 +345,7 @@ pub struct GeneratedShareDraft {
 
 #[derive(Debug, Clone)]
 pub struct GeneratedKeysetDraft {
-    pub keyset_name: String,
+    pub group_name: String,
     pub threshold: u16,
     pub count: u16,
     pub group_public_key: String,
@@ -400,7 +397,7 @@ pub struct RotationWorkspaceDocument {
     pub source_profile_id: String,
     pub source_group_id: String,
     pub source_group_public_key: String,
-    pub source_keyset_name: String,
+    pub source_group_name: String,
     pub source_threshold: u16,
     pub source_count: u16,
     pub next_threshold: u16,
@@ -813,9 +810,6 @@ pub fn resolve_profile_runtime(
     let (peers, manual_policy_overrides) =
         resolve_profile_peers_and_overrides(&group, &share, profile.policy_overrides.clone())
             .context("resolve peer policy overrides")?;
-    let remote_policy_observations =
-        parse_remote_policy_observations_doc(profile.remote_policy_observations.clone())
-            .context("resolve remote policy observations")?;
     let options: AppOptions = if profile.runtime_options.is_null() {
         AppOptions::default()
     } else {
@@ -831,7 +825,6 @@ pub fn resolve_profile_runtime(
             relays: relay_profile.relays,
             peers,
             manual_policy_overrides,
-            remote_policy_observations,
             options,
         },
     ))
@@ -1566,12 +1559,10 @@ pub async fn preview_bfshare_recovery(
     let payload = BfProfilePayload {
         profile_id: derive_profile_id_for_share_secret(&share.share_secret)?,
         version: backup.version,
-        keyset_name: backup.keyset_name,
         device: BfProfileDevice {
             name: label.clone().unwrap_or_else(|| backup.device.name.clone()),
             share_secret: share.share_secret,
             manual_peer_policy_overrides: backup.device.manual_peer_policy_overrides,
-            remote_peer_policy_observations: backup.device.remote_peer_policy_observations,
             relays: backup.device.relays,
         },
         group_package: backup.group_package,
@@ -1701,12 +1692,10 @@ pub async fn recover_profile_from_bfshare_value(
     let payload = BfProfilePayload {
         profile_id: derive_profile_id_for_share_secret(&share.share_secret)?,
         version: backup.version,
-        keyset_name: backup.keyset_name,
         device: BfProfileDevice {
             name: label.unwrap_or_else(|| backup.device.name.clone()),
             share_secret: share.share_secret,
             manual_peer_policy_overrides: backup.device.manual_peer_policy_overrides,
-            remote_peer_policy_observations: backup.device.remote_peer_policy_observations,
             relays: backup.device.relays,
         },
         group_package: backup.group_package,
@@ -1762,8 +1751,6 @@ pub fn finalize_rotation_update_import(
     );
     migrated.policy_overrides =
         build_policy_overrides_value(&rotated_payload.device.manual_peer_policy_overrides)?;
-    migrated.remote_policy_observations =
-        build_remote_policy_observations_value(&rotated_payload.device.remote_peer_policy_observations)?;
     migrated.runtime_options = target.runtime_options.clone();
     migrated.last_used_at = target.last_used_at;
     fs::create_dir_all(paths.profile_state_dir(&migrated.id))
@@ -1803,12 +1790,10 @@ pub async fn apply_rotation_update_from_bfonboard_value(
     let rotated_payload = BfProfilePayload {
         profile_id: connection.preview.profile_id.clone(),
         version: 1,
-        keyset_name: target_payload.keyset_name.clone(),
         device: BfProfileDevice {
             name: target.label.clone(),
             share_secret: hex::encode(connection.completion.share.seckey),
             manual_peer_policy_overrides: Vec::new(),
-            remote_peer_policy_observations: Vec::new(),
             relays: connection.completion.relays.clone(),
         },
         group_package: GroupPackageWire::from(connection.completion.group.clone()),
@@ -1842,15 +1827,18 @@ pub fn create_rotation_workspace(
     vault_passphrase: Option<String>,
 ) -> Result<RotationWorkspaceDocument> {
     paths.ensure()?;
-    create_keyset(CreateKeysetConfig { threshold, count })
-        .map_err(|error| anyhow!("validate rotation geometry: {error}"))?;
-
     let source_profile = read_profile(paths, source_profile_id)?;
     let source_payload = profile_to_package_payload(paths, source_profile_id, vault_passphrase)?;
+    create_keyset(CreateKeysetConfig {
+        group_name: source_payload.group_package.group_name.clone(),
+        threshold,
+        count,
+    })
+    .map_err(|error| anyhow!("validate rotation geometry: {error}"))?;
     let source_group = group_from_payload(&source_payload)?;
     let source_share = share_from_payload(&source_group, &source_payload)?;
     let source_group_id = hex::encode(get_group_id(&source_group).context("derive source group id")?);
-    let source_keyset_name = source_payload.keyset_name.clone();
+    let source_group_name = source_payload.group_package.group_name.clone();
 
     if workspace_root.exists() {
         bail!("rotation workspace already exists at {}", workspace_root.display());
@@ -1867,7 +1855,7 @@ pub fn create_rotation_workspace(
             label: if member_index == source_share.idx {
                 source_profile.label.clone()
             } else {
-                format!("{source_keyset_name} Device {member_index}")
+                format!("{source_group_name} Device {member_index}")
             },
             relays: source_payload.device.relays.clone(),
             usage_hint: if member_index == source_share.idx {
@@ -1899,7 +1887,7 @@ pub fn create_rotation_workspace(
         source_profile_id: source_profile_id.to_string(),
         source_group_id,
         source_group_public_key: hex::encode(source_group.group_pk),
-        source_keyset_name,
+        source_group_name,
         source_threshold: source_group.threshold,
         source_count: source_group.members.len() as u16,
         next_threshold: threshold,
@@ -2134,7 +2122,6 @@ pub async fn generate_rotation_workspace(
     let target = read_profile(paths, &replace_profile_id)?;
     let target_payload = profile_to_package_payload(paths, &replace_profile_id, vault_passphrase.clone())?;
     let local_payload = rotation_payload_from_share(
-        &document.source_keyset_name,
         &rotated.next.group,
         local_share,
         local_target.label.clone(),
@@ -2177,7 +2164,6 @@ pub async fn generate_rotation_workspace(
             .find(|share| share.idx == target.member_index)
             .ok_or_else(|| anyhow!("rotated share {} not found", target.member_index))?;
         let payload = rotation_payload_from_share(
-            &document.source_keyset_name,
             &rotated.next.group,
             share,
             target.label.clone(),
@@ -2265,8 +2251,6 @@ pub(crate) fn import_profile_from_bfprofile_payload(
     );
     profile.policy_overrides =
         build_policy_overrides_value(&payload.device.manual_peer_policy_overrides)?;
-    profile.remote_policy_observations =
-        build_remote_policy_observations_value(&payload.device.remote_peer_policy_observations)?;
     fs::create_dir_all(paths.profile_state_dir(&profile.id))
         .with_context(|| format!("create {}", paths.profile_state_dir(&profile.id).display()))?;
     write_profile(paths, &profile)?;
@@ -2280,11 +2264,15 @@ pub(crate) fn import_profile_from_bfprofile_payload(
 }
 
 pub fn create_generated_keyset_draft(
-    keyset_name: String,
+    group_name: String,
     threshold: u16,
     count: u16,
 ) -> Result<GeneratedKeysetDraft> {
-    let bundle = create_keyset(CreateKeysetConfig { threshold, count })
+    let bundle = create_keyset(CreateKeysetConfig {
+        group_name: group_name.clone(),
+        threshold,
+        count,
+    })
         .map_err(|error| anyhow!("create keyset: {error}"))?;
     let shares = bundle
         .shares
@@ -2292,13 +2280,13 @@ pub fn create_generated_keyset_draft(
         .map(|share| {
             Ok(GeneratedShareDraft {
                 member_idx: share.idx,
-                label: format!("{keyset_name} Device {}", share.idx),
+                label: format!("{group_name} Device {}", share.idx),
                 share_public_key: derive_member_pubkey_hex(share.seckey)?,
             })
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(GeneratedKeysetDraft {
-        keyset_name,
+        group_name,
         threshold,
         count,
         group_public_key: hex::encode(bundle.group.group_pk),
@@ -2331,7 +2319,6 @@ pub fn import_generated_share(
     let payload = BfProfilePayload {
         profile_id: derive_profile_id_for_share_secret(&share_secret_hex)?,
         version: 1,
-        keyset_name: draft.keyset_name.clone(),
         device: BfProfileDevice {
             name: label.clone(),
             share_secret: share_secret_hex,
@@ -2348,7 +2335,6 @@ pub fn import_generated_share(
                     )),
                 })
                 .collect(),
-            remote_peer_policy_observations: Vec::new(),
             relays: relay_urls,
         },
         group_package: GroupPackageWire::from(draft.group.clone()),
@@ -2433,12 +2419,10 @@ fn profile_to_package_payload(
     Ok(BfProfilePayload {
         profile_id: profile.id.clone(),
         version: 1,
-        keyset_name: profile.label,
         device: BfProfileDevice {
             name: manifest.label,
             share_secret: hex::encode(resolved.share.seckey),
             manual_peer_policy_overrides,
-            remote_peer_policy_observations: Vec::new(),
             relays: resolved.relays,
         },
         group_package: GroupPackageWire::from(resolved.group),
@@ -2484,7 +2468,6 @@ fn share_from_payload(
 }
 
 fn rotation_payload_from_share(
-    keyset_name: &str,
     group: &bifrost_core::types::GroupPackage,
     share: &bifrost_core::types::SharePackage,
     label: String,
@@ -2495,7 +2478,6 @@ fn rotation_payload_from_share(
     Ok(BfProfilePayload {
         profile_id: derive_profile_id_for_share_secret(&share_secret)?,
         version: 1,
-        keyset_name: keyset_name.to_string(),
         device: BfProfileDevice {
             name: label,
             share_secret,
@@ -2511,7 +2493,6 @@ fn rotation_payload_from_share(
                     )),
                 })
                 .collect(),
-            remote_peer_policy_observations: Vec::new(),
             relays,
         },
         group_package: GroupPackageWire::from(group.clone()),
@@ -2725,9 +2706,6 @@ fn resolve_profile_runtime_with_passphrase(
     let (peers, manual_policy_overrides) =
         resolve_profile_peers_and_overrides(&group, &share, profile.policy_overrides.clone())
             .context("resolve peer policy overrides")?;
-    let remote_policy_observations =
-        parse_remote_policy_observations_doc(profile.remote_policy_observations.clone())
-            .context("resolve remote policy observations")?;
     let options: AppOptions = if profile.runtime_options.is_null() {
         AppOptions::default()
     } else {
@@ -2742,7 +2720,6 @@ fn resolve_profile_runtime_with_passphrase(
             relays: relay_profile.relays,
             peers,
             manual_policy_overrides,
-            remote_policy_observations,
             options,
         },
     ))
@@ -3079,7 +3056,6 @@ fn build_profile_manifest(
             "default_override": null,
             "peer_overrides": []
         }),
-        remote_policy_observations: Value::Array(Vec::new()),
         state_path: state_dir.join("signer-state.bin").display().to_string(),
         daemon_socket_path: state_dir.join("daemon.sock").display().to_string(),
         created_at,
@@ -3095,32 +3071,6 @@ fn parse_policy_overrides_doc(value: Value) -> Result<PolicyOverridesDocument> {
         });
     }
     serde_json::from_value(value).context("parse policy overrides document")
-}
-
-fn parse_remote_policy_observations_doc(
-    value: Value,
-) -> Result<HashMap<String, bifrost_core::types::PeerScopedPolicyProfile>> {
-    if value.is_null() {
-        return Ok(HashMap::new());
-    }
-    let observations: Vec<BfRemotePeerPolicyObservation> =
-        serde_json::from_value(value).context("parse remote policy observations")?;
-    let mut remote_policy_observations = HashMap::new();
-    for observation in observations {
-        remote_policy_observations.insert(
-            observation.pubkey.clone(),
-            bf_peer_scoped_policy_profile_to_core(&observation.profile).with_context(|| {
-                format!("parse remote policy observation {}", observation.pubkey)
-            })?,
-        );
-    }
-    Ok(remote_policy_observations)
-}
-
-fn build_remote_policy_observations_value(
-    observations: &[BfRemotePeerPolicyObservation],
-) -> Result<Value> {
-    serde_json::to_value(observations).context("serialize remote policy observations")
 }
 
 fn resolve_profile_peers_and_overrides(
@@ -3566,6 +3516,7 @@ mod tests {
         .expect("write relay profile");
 
         let bundle = create_keyset(CreateKeysetConfig {
+            group_name: "Test Group".to_string(),
             threshold: 2,
             count: 3,
         })
@@ -3686,6 +3637,7 @@ mod tests {
         .expect("write relay profile");
 
         let bundle = create_keyset(CreateKeysetConfig {
+            group_name: "Test Group".to_string(),
             threshold: 2,
             count: 3,
         })

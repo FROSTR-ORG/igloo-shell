@@ -392,7 +392,7 @@ struct RotateKeysetGenerateArgs {
 #[derive(Debug, Args)]
 struct KeygenArgs {
     #[arg(long)]
-    keyset_name: Option<String>,
+    group_name: Option<String>,
     #[arg(long)]
     threshold: Option<u16>,
     #[arg(long)]
@@ -1072,11 +1072,11 @@ async fn handle_rotate_keyset_generate(
 
 async fn handle_keygen(paths: &ShellPaths, args: KeygenArgs) -> Result<()> {
     let stdin_is_terminal = std::io::stdin().is_terminal();
-    let keyset_name = resolve_required_text(
-        args.keyset_name,
+    let group_name = resolve_required_text(
+        args.group_name,
         stdin_is_terminal,
-        "keygen requires --keyset-name when stdin is not a TTY",
-        prompt_keyset_name,
+        "keygen requires --group-name when stdin is not a TTY",
+        prompt_group_name,
     )?;
     let threshold = resolve_u16_input(
         args.threshold,
@@ -1092,7 +1092,7 @@ async fn handle_keygen(paths: &ShellPaths, args: KeygenArgs) -> Result<()> {
         "keygen requires --count when stdin is not a TTY",
         prompt_count,
     )?;
-    let draft = create_generated_keyset_draft(keyset_name, threshold, count)?;
+    let draft = create_generated_keyset_draft(group_name, threshold, count)?;
     let member_index = resolve_member_index(
         args.member_index,
         &draft,
@@ -1920,13 +1920,13 @@ fn prompt_rotation_source_package_secret(package_path: &str) -> Result<String> {
     )
 }
 
-fn prompt_keyset_name() -> Result<String> {
+fn prompt_group_name() -> Result<String> {
     prompt_line(
         &[
-            "Create a new local keyset.",
-            "Type the keyset name that should be used for these generated shares.",
+            "Create a new local group.",
+            "Type the group name that should be used to identify this group and its shares.",
         ],
-        "Keyset name",
+        "Group name",
     )
 }
 
