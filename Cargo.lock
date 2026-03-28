@@ -203,7 +203,7 @@ checksum = "32637268377fc7b10a8c6d51de3e7fba1ce5dd371a96e342b34e6078db558e7f"
 
 [[package]]
 name = "bifrost-app"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -233,7 +233,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-bridge-tokio"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -250,7 +250,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-codec"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bifrost-core",
  "hex",
@@ -261,7 +261,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "frost-secp256k1-tr-unofficial",
  "hex",
@@ -276,7 +276,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-router"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "bifrost-core",
@@ -289,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-signer"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64",
  "bifrost-codec",
@@ -833,7 +833,7 @@ dependencies = [
 
 [[package]]
 name = "frostr-utils"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -1195,7 +1195,7 @@ dependencies = [
 
 [[package]]
 name = "igloo-shell-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bifrost-app",
@@ -1212,7 +1212,7 @@ dependencies = [
 
 [[package]]
 name = "igloo-shell-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "argon2",
