@@ -19,7 +19,12 @@ fn group_public_key_for_profile(harness: &TestHarness, profile_id: &str) -> Stri
         Some(Value::String(value)) => value.clone(),
         Some(Value::Array(group_pk)) => group_pk
             .iter()
-            .map(|byte| format!("{:02x}", byte.as_u64().expect("group public key byte") as u8))
+            .map(|byte| {
+                format!(
+                    "{:02x}",
+                    byte.as_u64().expect("group public key byte") as u8
+                )
+            })
             .collect::<String>(),
         _ => panic!("group public key bytes"),
     }
@@ -120,7 +125,8 @@ fn rotate_keyset_init_and_generate_replace_local_profile_and_emit_bfonboard_pack
 
     let alice_bfshare = harness.export_bfshare_package(&alice_id, "alice-rotate-pass");
     let bob_bfshare = harness.export_bfshare_package(&bob_id, "bob-rotate-pass");
-    let alice_bfshare_path = harness.save_onboarding_package("alice-rotate.bfshare", &alice_bfshare);
+    let alice_bfshare_path =
+        harness.save_onboarding_package("alice-rotate.bfshare", &alice_bfshare);
     let bob_bfshare_path = harness.save_onboarding_package("bob-rotate.bfshare", &bob_bfshare);
     let workspace = harness.root().join("rotation-workspace");
 
@@ -133,10 +139,28 @@ fn rotate_keyset_init_and_generate_replace_local_profile_and_emit_bfonboard_pack
     );
     let show = harness.rotate_keyset_show(&workspace);
     let status = show.get("status").expect("rotation workspace status");
-    assert_eq!(status.get("source_packages_present").and_then(Value::as_u64), Some(2));
-    assert_eq!(status.get("source_packages_required").and_then(Value::as_u64), Some(2));
-    assert_eq!(status.get("local_target_member_index").and_then(Value::as_u64), Some(1));
-    assert_eq!(status.get("remote_target_count").and_then(Value::as_u64), Some(3));
+    assert_eq!(
+        status
+            .get("source_packages_present")
+            .and_then(Value::as_u64),
+        Some(2)
+    );
+    assert_eq!(
+        status
+            .get("source_packages_required")
+            .and_then(Value::as_u64),
+        Some(2)
+    );
+    assert_eq!(
+        status
+            .get("local_target_member_index")
+            .and_then(Value::as_u64),
+        Some(1)
+    );
+    assert_eq!(
+        status.get("remote_target_count").and_then(Value::as_u64),
+        Some(3)
+    );
     assert_eq!(
         init.get("workspace").and_then(Value::as_str),
         Some(workspace.display().to_string().as_str())
@@ -216,7 +240,10 @@ fn rotate_keyset_init_and_generate_replace_local_profile_and_emit_bfonboard_pack
             .get("path")
             .and_then(Value::as_str)
             .expect("generated package path");
-        assert!(std::path::Path::new(path).is_file(), "missing generated package: {path}");
+        assert!(
+            std::path::Path::new(path).is_file(),
+            "missing generated package: {path}"
+        );
         match package.get("member_index").and_then(Value::as_u64) {
             Some(2) => rotate_package_path = Some(path.to_string()),
             Some(3) => onboard_package_path = Some(path.to_string()),

@@ -1436,6 +1436,40 @@ pub async fn connect_onboarding_package_preview(
     })
 }
 
+pub fn finalize_connected_onboarding_import(
+    paths: &ShellPaths,
+    connection: ConnectedOnboardingImport,
+    label: Option<String>,
+    relay_profile: Option<String>,
+    vault_passphrase: Option<String>,
+) -> Result<ProfileImportResult> {
+    paths.ensure()?;
+    let relay_profile_id = ensure_onboarding_relay_profile(
+        paths,
+        relay_profile,
+        label.as_deref(),
+        &connection.completion.relays,
+    )?;
+    let share_raw =
+        serde_json::to_string_pretty(&SharePackageWire::from(connection.completion.share.clone()))
+            .context("serialize onboarded share package")?;
+    let share_record = store_secret_payload(
+        paths,
+        "share_package",
+        "bfonboard_import",
+        &share_raw,
+        vault_passphrase,
+    )?;
+
+    finalize_onboarding_import(
+        paths,
+        connection.completion,
+        label,
+        relay_profile_id,
+        share_record,
+    )
+}
+
 async fn import_profile_from_onboarding_value_with<F, Fut>(
     paths: &ShellPaths,
     package_raw: &str,
@@ -1450,7 +1484,6 @@ where
     Fut: std::future::Future<Output = Result<BootstrapImportResult>>,
 {
     paths.ensure()?;
-    let vault_passphrase_for_share = vault_passphrase.clone();
     let password = resolve_secret(
         onboarding_password,
         ONBOARDING_ENV_PASSPHRASE,
@@ -1458,36 +1491,26 @@ where
     )?;
     let decoded = decode_bfonboard_package(&package_raw, password.as_str())
         .context("decode bfonboard package")?;
-    let relay_profile_id =
-        ensure_onboarding_relay_profile(paths, relay_profile, label.as_deref(), &decoded.relays)?;
-    let vault_record = store_secret_payload(
-        paths,
-        "onboarding_package",
-        "file_import",
-        &package_raw,
-        vault_passphrase,
-    )?;
-
     let completion = match complete(decoded).await {
         Ok(completion) => completion,
-        Err(err) => {
-            let _ = remove_vault_record(paths, &vault_record.id);
-            return Err(err);
-        }
+        Err(err) => return Err(err),
     };
-
-    let share_raw = serde_json::to_string_pretty(&SharePackageWire::from(completion.share.clone()))
-        .context("serialize onboarded share package")?;
-    let share_record = store_secret_payload(
-        paths,
-        "share_package",
-        "bfonboard_import",
-        &share_raw,
-        vault_passphrase_for_share,
+    let preview = preview_from_bootstrap_completion(
+        &completion,
+        None,
+        "bfonboard",
+        Some(completion.peer_pubkey.clone()),
     )?;
-    let _ = remove_vault_record(paths, &vault_record.id);
-
-    finalize_onboarding_import(paths, completion, label, relay_profile_id, share_record)
+    finalize_connected_onboarding_import(
+        paths,
+        ConnectedOnboardingImport {
+            preview,
+            completion,
+        },
+        label,
+        relay_profile,
+        vault_passphrase,
+    )
 }
 
 pub fn preview_bfprofile_value(
@@ -1711,7 +1734,9 @@ pub fn finalize_rotation_update_import(
     rotated_payload: BfProfilePayload,
     vault_passphrase: Option<String>,
 ) -> Result<ProfileImportResult> {
-    if hex::encode(rotated_group.group_pk) != hex::encode(group_from_payload(&target_payload)?.group_pk) {
+    if hex::encode(rotated_group.group_pk)
+        != hex::encode(group_from_payload(&target_payload)?.group_pk)
+    {
         bail!("rotation update does not match the selected profile group public key");
     }
     if rotated_payload.profile_id == target_payload.profile_id {
@@ -1720,7 +1745,10 @@ pub fn finalize_rotation_update_import(
 
     paths.ensure()?;
     let share = bifrost_core::types::SharePackage {
-        idx: find_member_index_for_share_secret(rotated_group, &rotated_payload.device.share_secret)?,
+        idx: find_member_index_for_share_secret(
+            rotated_group,
+            &rotated_payload.device.share_secret,
+        )?,
         seckey: hex_to_bytes32(&rotated_payload.device.share_secret)?,
     };
     let relay_profile_id = ensure_onboarding_relay_profile(
@@ -1780,7 +1808,9 @@ pub async fn apply_rotation_update_from_bfonboard_value(
         profile_to_package_payload(paths, target_profile_id, vault_passphrase.clone())?;
     let connection = connect_onboarding_package_preview(package_raw, onboarding_password).await?;
 
-    if connection.preview.group_public_key != hex::encode(group_from_payload(&target_payload)?.group_pk) {
+    if connection.preview.group_public_key
+        != hex::encode(group_from_payload(&target_payload)?.group_pk)
+    {
         bail!("rotation update does not match the selected profile group public key");
     }
     if connection.preview.profile_id == target_payload.profile_id {
@@ -1810,11 +1840,9 @@ pub async fn apply_rotation_update_from_bfonboard_value(
 }
 
 pub fn default_rotation_workspace_path(paths: &ShellPaths, source_profile_id: &str) -> PathBuf {
-    paths.rotations_dir.join(format!(
-        "{}-{}",
-        source_profile_id,
-        now_unix_secs()
-    ))
+    paths
+        .rotations_dir
+        .join(format!("{}-{}", source_profile_id, now_unix_secs()))
 }
 
 pub fn create_rotation_workspace(
@@ -1837,11 +1865,15 @@ pub fn create_rotation_workspace(
     .map_err(|error| anyhow!("validate rotation geometry: {error}"))?;
     let source_group = group_from_payload(&source_payload)?;
     let source_share = share_from_payload(&source_group, &source_payload)?;
-    let source_group_id = hex::encode(get_group_id(&source_group).context("derive source group id")?);
+    let source_group_id =
+        hex::encode(get_group_id(&source_group).context("derive source group id")?);
     let source_group_name = source_payload.group_package.group_name.clone();
 
     if workspace_root.exists() {
-        bail!("rotation workspace already exists at {}", workspace_root.display());
+        bail!(
+            "rotation workspace already exists at {}",
+            workspace_root.display()
+        );
     }
 
     let targets = (1..=count)
@@ -1967,10 +1999,7 @@ pub fn inspect_rotation_workspace(
             ));
         }
         if target.label.trim().is_empty() {
-            validation_errors.push(format!(
-                "member {} is missing a label",
-                target.member_index
-            ));
+            validation_errors.push(format!("member {} is missing a label", target.member_index));
         }
         if target.relays.is_empty() {
             validation_errors.push(format!(
@@ -1983,7 +2012,13 @@ pub fn inspect_rotation_workspace(
                 local_target_count += 1;
                 local_target_member_index = Some(target.member_index);
                 local_replace_profile_id = target.replace_profile_id.clone();
-                if target.replace_profile_id.as_deref().unwrap_or("").trim().is_empty() {
+                if target
+                    .replace_profile_id
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim()
+                    .is_empty()
+                {
                     validation_errors.push(format!(
                         "member {} must declare replace_profile_id for local_replace",
                         target.member_index
@@ -2008,7 +2043,8 @@ pub fn inspect_rotation_workspace(
         }
     }
     if local_target_count != 1 {
-        validation_errors.push("rotation workspace must contain exactly one local_replace target".to_string());
+        validation_errors
+            .push("rotation workspace must contain exactly one local_replace target".to_string());
     }
 
     RotationWorkspaceStatus {
@@ -2065,13 +2101,15 @@ pub async fn generate_rotation_workspace(
     for (index, source) in document.source_packages.iter().enumerate() {
         let package_raw = fs::read_to_string(&source.package_path)
             .with_context(|| format!("read {}", source.package_path))?;
-        let (_, payload) = preview_bfshare_recovery(&package_raw, source_passwords[index].clone(), None)
-            .await
-            .with_context(|| format!("recover {}", source.package_path))?;
+        let (_, payload) =
+            preview_bfshare_recovery(&package_raw, source_passwords[index].clone(), None)
+                .await
+                .with_context(|| format!("recover {}", source.package_path))?;
         recovered.push(payload);
     }
     let current_group = group_from_payload(&recovered[0])?;
-    let current_group_id = hex::encode(get_group_id(&current_group).context("derive current group id")?);
+    let current_group_id =
+        hex::encode(get_group_id(&current_group).context("derive current group id")?);
     let current_group_pk = hex::encode(current_group.group_pk);
     if current_group_id != document.source_group_id {
         bail!("rotation sources do not match the workspace source group id");
@@ -2120,7 +2158,8 @@ pub async fn generate_rotation_workspace(
         .clone()
         .ok_or_else(|| anyhow!("local_replace target is missing replace_profile_id"))?;
     let target = read_profile(paths, &replace_profile_id)?;
-    let target_payload = profile_to_package_payload(paths, &replace_profile_id, vault_passphrase.clone())?;
+    let target_payload =
+        profile_to_package_payload(paths, &replace_profile_id, vault_passphrase.clone())?;
     let local_payload = rotation_payload_from_share(
         &rotated.next.group,
         local_share,
@@ -2149,7 +2188,9 @@ pub async fn generate_rotation_workspace(
     let distribution_password = if remote_targets.is_empty() {
         None
     } else {
-        Some(distribution_password.ok_or_else(|| anyhow!("rotation requires a distribution secret to emit bfonboard packages"))?)
+        Some(distribution_password.ok_or_else(|| {
+            anyhow!("rotation requires a distribution secret to emit bfonboard packages")
+        })?)
     };
 
     let packages_dir = workspace_root.join("packages");
@@ -2174,7 +2215,9 @@ pub async fn generate_rotation_workspace(
             .output_path
             .clone()
             .map(PathBuf::from)
-            .unwrap_or_else(|| packages_dir.join(format!("member-{}.bfonboard.txt", target.member_index)));
+            .unwrap_or_else(|| {
+                packages_dir.join(format!("member-{}.bfonboard.txt", target.member_index))
+            });
         if let Some(parent) = output_path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
         }
@@ -2193,9 +2236,12 @@ pub async fn generate_rotation_workspace(
             member_index: target.member_index,
             label: target.label.clone(),
             profile_id: payload.profile_id,
-            usage_hint: target
-                .usage_hint
-                .ok_or_else(|| anyhow!("rotation target {} is missing usage_hint", target.member_index))?,
+            usage_hint: target.usage_hint.ok_or_else(|| {
+                anyhow!(
+                    "rotation target {} is missing usage_hint",
+                    target.member_index
+                )
+            })?,
             path: output_path.display().to_string(),
         });
     }
@@ -2273,7 +2319,7 @@ pub fn create_generated_keyset_draft(
         threshold,
         count,
     })
-        .map_err(|error| anyhow!("create keyset: {error}"))?;
+    .map_err(|error| anyhow!("create keyset: {error}"))?;
     let shares = bundle
         .shares
         .iter()
@@ -2383,10 +2429,18 @@ fn export_rotated_onboarding_package(
     if local_share.idx == target_share.idx {
         bail!("rotation onboarding target must differ from the local replacement member");
     }
-    if !group.members.iter().any(|member| member.idx == local_share.idx) {
+    if !group
+        .members
+        .iter()
+        .any(|member| member.idx == local_share.idx)
+    {
         bail!("rotated group is missing the local replacement member");
     }
-    if !group.members.iter().any(|member| member.idx == target_share.idx) {
+    if !group
+        .members
+        .iter()
+        .any(|member| member.idx == target_share.idx)
+    {
         bail!("rotated group is missing the target member");
     }
     encode_bfonboard_package(
@@ -3405,6 +3459,7 @@ mod tests {
 
     fn sample_group() -> GroupPackage {
         GroupPackage {
+            group_name: "Shell Test Group".to_string(),
             group_pk: [9u8; 32],
             threshold: 2,
             members: vec![

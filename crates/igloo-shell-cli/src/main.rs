@@ -11,8 +11,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use crossterm::event::{Event, KeyCode, KeyEventKind, read};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use igloo_shell_core::shell::{
-    DaemonMetadata, PolicyDirection, PolicyMethod, RelayProfile, SetupRequest, ShellCheckKind,
-    RotationWorkspaceDocument, ShellPaths, add_relays,
+    DaemonMetadata, PolicyDirection, PolicyMethod, RelayProfile, RotationWorkspaceDocument,
+    SetupRequest, ShellCheckKind, ShellPaths, add_relays,
     apply_rotation_update_from_bfonboard_value, check_profile_runtime, clear_profile_peer_policy,
     create_generated_keyset_draft, create_rotation_workspace, daemon_log_path,
     daemon_runtime_query, default_rotation_workspace_path, doctor_profile,
@@ -21,12 +21,11 @@ use igloo_shell_core::shell::{
     import_generated_share, import_profile_from_bfprofile_value, import_profile_from_files,
     import_profile_from_onboarding_value, inspect_rotation_workspace, list_profiles,
     load_relay_profiles, load_rotation_workspace, load_shell_config, publish_profile_backup,
-    read_daemon_metadata, read_profile, recover_profile_from_bfshare_value,
-    remove_daemon_metadata, remove_profile, remove_relays, replace_relay_profile,
-    resolve_profile_runtime, run_setup, set_default_relay_profile,
-    set_profile_default_policy_override, set_profile_peer_policy_override, start_profile_daemon,
-    start_profile_daemon_with_passphrase, stop_profile_daemon, test_relay_connectivity,
-    validate_profile_unlock_with_passphrase,
+    read_daemon_metadata, read_profile, recover_profile_from_bfshare_value, remove_daemon_metadata,
+    remove_profile, remove_relays, replace_relay_profile, resolve_profile_runtime, run_setup,
+    set_default_relay_profile, set_profile_default_policy_override,
+    set_profile_peer_policy_override, start_profile_daemon, start_profile_daemon_with_passphrase,
+    stop_profile_daemon, test_relay_connectivity, validate_profile_unlock_with_passphrase,
 };
 use nostr::{FromBech32, Keys, PublicKey, SecretKey, ToBech32};
 use serde::Serialize;
