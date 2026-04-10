@@ -100,8 +100,8 @@ impl TestHarness {
         self.data_home().join("igloo-shell")
     }
 
-    pub fn vault_dir(&self) -> PathBuf {
-        self.shell_data_dir().join("vault")
+    pub fn encrypted_profiles_dir(&self) -> PathBuf {
+        self.shell_data_dir().join("encrypted-profiles")
     }
 
     pub fn run(&self, args: &[&str]) -> CommandResult {
@@ -243,8 +243,8 @@ impl TestHarness {
                 &label,
                 "--relay-profile",
                 relay_profile,
-                "--vault-secret",
-                "vault-passphrase",
+                "--passphrase",
+                "encrypted-profile-passphrase",
                 "--json",
             ],
             &[],
@@ -256,7 +256,7 @@ impl TestHarness {
         package_path: &Path,
         label: &str,
         onboarding_secret: &str,
-        vault_secret: &str,
+        passphrase: &str,
     ) -> Value {
         let label = self.unique_label(label);
         self.run_json(&[
@@ -264,8 +264,8 @@ impl TestHarness {
             path_arg(package_path),
             "--onboard-secret",
             onboarding_secret,
-            "--vault-secret",
-            vault_secret,
+            "--passphrase",
+            passphrase,
             "--json",
             "--label",
             &label,
@@ -277,7 +277,7 @@ impl TestHarness {
         package: &str,
         label: &str,
         onboarding_secret: &str,
-        vault_secret: &str,
+        passphrase: &str,
     ) -> Value {
         let label = self.unique_label(label);
         self.run_json(&[
@@ -285,8 +285,8 @@ impl TestHarness {
             package,
             "--onboard-secret",
             onboarding_secret,
-            "--vault-secret",
-            vault_secret,
+            "--passphrase",
+            passphrase,
             "--json",
             "--label",
             &label,
@@ -298,7 +298,7 @@ impl TestHarness {
         package_path: &Path,
         label: &str,
         onboarding_secret_file: &Path,
-        vault_secret_file: &Path,
+        passphrase_file: &Path,
     ) -> Value {
         let label = self.unique_label(label);
         self.run_json(&[
@@ -306,8 +306,8 @@ impl TestHarness {
             path_arg(package_path),
             "--onboard-secret-file",
             path_arg(onboarding_secret_file),
-            "--vault-secret-file",
-            path_arg(vault_secret_file),
+            "--passphrase-file",
+            path_arg(passphrase_file),
             "--json",
             "--label",
             &label,
@@ -319,7 +319,7 @@ impl TestHarness {
         package_path: &Path,
         profile_id: &str,
         onboarding_secret: &str,
-        vault_secret: &str,
+        passphrase: &str,
     ) -> Value {
         self.run_json(&[
             "rotate-key",
@@ -328,8 +328,8 @@ impl TestHarness {
             profile_id,
             "--onboard-secret",
             onboarding_secret,
-            "--vault-secret",
-            vault_secret,
+            "--passphrase",
+            passphrase,
             "--json",
         ])
     }
@@ -339,7 +339,7 @@ impl TestHarness {
         package_path: &Path,
         profile_id: &str,
         onboarding_secret: &str,
-        vault_secret: &str,
+        passphrase: &str,
     ) -> CommandResult {
         self.run_expect_failure(
             &[
@@ -349,8 +349,8 @@ impl TestHarness {
                 profile_id,
                 "--onboard-secret",
                 onboarding_secret,
-                "--vault-secret",
-                vault_secret,
+                "--passphrase",
+                passphrase,
             ],
             &[],
         )
@@ -380,7 +380,10 @@ impl TestHarness {
             ],
             &[
                 ("IGLOO_SHELL_PACKAGE_PASSWORD", password),
-                ("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase"),
+                (
+                    "IGLOO_SHELL_PROFILE_PASSPHRASE",
+                    "encrypted-profile-passphrase",
+                ),
             ],
         );
         fs::read_to_string(&out_path)
@@ -404,7 +407,10 @@ impl TestHarness {
             ],
             &[
                 ("IGLOO_SHELL_PACKAGE_PASSWORD", password),
-                ("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase"),
+                (
+                    "IGLOO_SHELL_PROFILE_PASSPHRASE",
+                    "encrypted-profile-passphrase",
+                ),
             ],
         );
         fs::read_to_string(&out_path)
@@ -428,7 +434,10 @@ impl TestHarness {
             ],
             &[
                 ("IGLOO_SHELL_PACKAGE_PASSWORD", password),
-                ("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase"),
+                (
+                    "IGLOO_SHELL_PROFILE_PASSPHRASE",
+                    "encrypted-profile-passphrase",
+                ),
             ],
         );
         fs::read_to_string(&out_path)
@@ -448,7 +457,10 @@ impl TestHarness {
                 "--out",
                 path_arg(&out_path),
             ],
-            &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+            &[(
+                "IGLOO_SHELL_PROFILE_PASSPHRASE",
+                "encrypted-profile-passphrase",
+            )],
         );
         out_path
     }
@@ -484,8 +496,8 @@ impl TestHarness {
             count.to_string(),
             "--workspace".to_string(),
             path_arg(workspace).to_string(),
-            "--vault-secret".to_string(),
-            "vault-passphrase".to_string(),
+            "--passphrase".to_string(),
+            "encrypted-profile-passphrase".to_string(),
             "--json".to_string(),
         ];
         for package in source_packages {
@@ -512,7 +524,10 @@ impl TestHarness {
         distribution_secret: &str,
         extra_env: &[(&str, &str)],
     ) -> Value {
-        let mut env = vec![("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")];
+        let mut env = vec![(
+            "IGLOO_SHELL_PROFILE_PASSPHRASE",
+            "encrypted-profile-passphrase",
+        )];
         env.extend_from_slice(extra_env);
         self.run_json_with_env(
             &[
@@ -520,8 +535,8 @@ impl TestHarness {
                 "generate",
                 "--workspace",
                 path_arg(workspace),
-                "--vault-secret",
-                "vault-passphrase",
+                "--passphrase",
+                "encrypted-profile-passphrase",
                 "--distribution-secret",
                 distribution_secret,
                 "--json",
@@ -537,7 +552,10 @@ impl TestHarness {
     pub fn stop_daemon(&self, profile_id: &str) {
         let _ = self.run_with_env(
             &["daemon", "stop", "--profile", profile_id],
-            &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+            &[(
+                "IGLOO_SHELL_PROFILE_PASSPHRASE",
+                "encrypted-profile-passphrase",
+            )],
         );
     }
 
@@ -551,7 +569,10 @@ impl TestHarness {
             let output = self
                 .command_with_env(
                     &["runtime", "status", "--profile", profile_id],
-                    &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+                    &[(
+                        "IGLOO_SHELL_PROFILE_PASSPHRASE",
+                        "encrypted-profile-passphrase",
+                    )],
                 )
                 .output()
                 .expect("run runtime status");
@@ -583,7 +604,10 @@ impl TestHarness {
     pub fn run_check(&self, profile_id: &str, kind: &str) -> Value {
         self.run_json_with_env(
             &["check", kind, "--profile", profile_id],
-            &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+            &[(
+                "IGLOO_SHELL_PROFILE_PASSPHRASE",
+                "encrypted-profile-passphrase",
+            )],
         )
     }
 
@@ -605,10 +629,13 @@ impl TestHarness {
                 "profile",
                 "backup",
                 profile_id,
-                "--vault-passphrase-env",
-                "IGLOO_SHELL_VAULT_PASSPHRASE",
+                "--passphrase-env",
+                "IGLOO_SHELL_PROFILE_PASSPHRASE",
             ],
-            &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+            &[(
+                "IGLOO_SHELL_PROFILE_PASSPHRASE",
+                "encrypted-profile-passphrase",
+            )],
         )
     }
 
@@ -624,7 +651,10 @@ impl TestHarness {
         match profile_id {
             Some(profile_id) => self.run_json_with_env(
                 &["daemon", "status", "--profile", profile_id],
-                &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+                &[(
+                    "IGLOO_SHELL_PROFILE_PASSPHRASE",
+                    "encrypted-profile-passphrase",
+                )],
             ),
             None => self.run_json(&["daemon", "status"]),
         }
@@ -637,28 +667,40 @@ impl TestHarness {
     pub fn runtime_status(&self, profile_id: &str) -> Value {
         self.run_json_with_env(
             &["runtime", "status", "--profile", profile_id],
-            &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+            &[(
+                "IGLOO_SHELL_PROFILE_PASSPHRASE",
+                "encrypted-profile-passphrase",
+            )],
         )
     }
 
     pub fn runtime_diagnostics(&self, profile_id: &str) -> Value {
         self.run_json_with_env(
             &["runtime", "diagnostics", "--profile", profile_id],
-            &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+            &[(
+                "IGLOO_SHELL_PROFILE_PASSPHRASE",
+                "encrypted-profile-passphrase",
+            )],
         )
     }
 
     pub fn runtime_ops(&self, profile_id: &str) -> Value {
         self.run_json_with_env(
             &["runtime", "ops", "--profile", profile_id],
-            &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+            &[(
+                "IGLOO_SHELL_PROFILE_PASSPHRASE",
+                "encrypted-profile-passphrase",
+            )],
         )
     }
 
     pub fn runtime_wipe_state(&self, profile_id: &str) -> Value {
         self.run_json_with_env(
             &["runtime", "wipe-state", "--profile", profile_id, "--yes"],
-            &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+            &[(
+                "IGLOO_SHELL_PROFILE_PASSPHRASE",
+                "encrypted-profile-passphrase",
+            )],
         )
     }
 
@@ -783,7 +825,10 @@ impl TestHarness {
             let output = self
                 .command_with_env(
                     args,
-                    &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+                    &[(
+                        "IGLOO_SHELL_PROFILE_PASSPHRASE",
+                        "encrypted-profile-passphrase",
+                    )],
                 )
                 .output()
                 .expect("run daemon lifecycle command");
@@ -812,7 +857,10 @@ impl Drop for TestHarness {
                     let _ = self
                         .command_with_env(
                             &["daemon", "stop", "--profile", profile_id],
-                            &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+                            &[(
+                                "IGLOO_SHELL_PROFILE_PASSPHRASE",
+                                "encrypted-profile-passphrase",
+                            )],
                         )
                         .output();
                 }

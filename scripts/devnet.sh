@@ -14,7 +14,7 @@ PROFILE_FILE="${WORK_DIR}/profiles.env"
 RELAY_HOST="${RELAY_HOST:-127.0.0.1}"
 RELAY_PORT="${RELAY_PORT:-8194}"
 RELAY_URL="ws://${RELAY_HOST}:${RELAY_PORT}"
-VAULT_PASSPHRASE="${IGLOO_SHELL_VAULT_PASSPHRASE:-devnet-passphrase}"
+PASSPHRASE="${IGLOO_SHELL_PROFILE_PASSPHRASE:-devnet-passphrase}"
 
 mkdir -p "${WORK_DIR}" "${LOG_DIR}"
 
@@ -55,7 +55,7 @@ managed_shell_cmd() {
     XDG_CONFIG_HOME="${XDG_CONFIG_HOME}" \
     XDG_DATA_HOME="${XDG_DATA_HOME}" \
     XDG_STATE_HOME="${XDG_STATE_HOME}" \
-    IGLOO_SHELL_VAULT_PASSPHRASE="${VAULT_PASSPHRASE}" \
+    IGLOO_SHELL_PROFILE_PASSPHRASE="${PASSPHRASE}" \
     cargo run -p igloo-shell-cli --offline -- "$@"
 }
 
@@ -66,6 +66,21 @@ parse_json_field() {
 
 parse_json_pubkeys() {
   sed -n 's/^[[:space:]]*"pubkey":[[:space:]]*"\([^"]*\)".*/\1/p'
+}
+
+parse_import_profile_id() {
+  awk '
+    /"import"[[:space:]]*:[[:space:]]*{/ { in_import=1 }
+    in_import && /"profile"[[:space:]]*:[[:space:]]*{/ { in_profile=1; next }
+    in_profile && /"id"[[:space:]]*:[[:space:]]*"/ {
+      line = $0
+      sub(/.*"id"[[:space:]]*:[[:space:]]*"/, "", line)
+      sub(/".*/, "", line)
+      print line
+      exit
+    }
+    in_profile && /^[[:space:]]*}/ { in_profile=0 }
+  '
 }
 
 write_profiles_file() {
@@ -103,10 +118,10 @@ import_profile() {
       --share "${share_path}" \
       --label "${label}" \
       --relay-profile local \
-      --vault-secret "${VAULT_PASSPHRASE}" \
+      --passphrase "${PASSPHRASE}" \
       --json
   )"
-  printf '%s\n' "${output}" | parse_json_field "id"
+  printf '%s\n' "${output}" | parse_import_profile_id
 }
 
 run_gen() {

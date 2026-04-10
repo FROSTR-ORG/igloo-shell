@@ -19,5 +19,6 @@ nostr = { version = "0.44", features = ["std"] }
 crossterm = "0.29"
 bifrost-app = { path = "../../../bifrost-rs/crates/bifrost-app" }
 bifrost-core = { path = "../../../bifrost-rs/crates/bifrost-core" }
+bifrost-profile = { path = "../../../bifrost-rs/crates/bifrost-profile" }
 frostr-utils = { path = "../../../bifrost-rs/crates/frostr-utils" }
 igloo-shell-core = { path = "../igloo-shell-core" }

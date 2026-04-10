@@ -211,12 +211,14 @@ dependencies = [
  "bifrost-bridge-tokio",
  "bifrost-codec",
  "bifrost-core",
+ "bifrost-profile",
  "bifrost-signer",
  "bincode",
  "chacha20",
  "chacha20poly1305",
  "frostr-utils",
  "fs2",
+ "futures-util",
  "hex",
  "hmac",
  "k256",
@@ -227,6 +229,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+ "tokio-tungstenite 0.24.0",
  "tracing",
  "tracing-subscriber",
 ]
@@ -272,6 +275,28 @@ dependencies = [
  "sha2",
  "thiserror 2.0.18",
  "zeroize",
+]
+
+[[package]]
+name = "bifrost-profile"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "bifrost-codec",
+ "bifrost-core",
+ "chacha20poly1305",
+ "frostr-utils",
+ "futures-util",
+ "hex",
+ "k256",
+ "nostr",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
 ]
 
 [[package]]
@@ -1200,6 +1225,7 @@ dependencies = [
  "anyhow",
  "bifrost-app",
  "bifrost-core",
+ "bifrost-profile",
  "clap",
  "crossterm",
  "frostr-utils",
@@ -1215,19 +1241,17 @@ name = "igloo-shell-core"
 version = "0.2.0"
 dependencies = [
  "anyhow",
- "argon2",
  "bifrost-app",
  "bifrost-codec",
  "bifrost-core",
+ "bifrost-profile",
  "bifrost-signer",
  "bincode",
- "chacha20poly1305",
  "frostr-utils",
  "futures-util",
  "hex",
  "k256",
  "nostr",
- "rand_core 0.6.4",
  "serde",
  "serde_json",
  "sha2",

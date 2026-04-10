@@ -7,7 +7,7 @@ XDG_CONFIG_HOME="${WORK_DIR}/config"
 XDG_DATA_HOME="${WORK_DIR}/data"
 XDG_STATE_HOME="${WORK_DIR}/state"
 PROFILE_FILE="${WORK_DIR}/profiles.env"
-VAULT_PASSPHRASE="${IGLOO_SHELL_VAULT_PASSPHRASE:-devnet-passphrase}"
+PASSPHRASE="${IGLOO_SHELL_PROFILE_PASSPHRASE:-devnet-passphrase}"
 MESSAGE_HEX32="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 managed_shell_cmd() {
@@ -15,7 +15,7 @@ managed_shell_cmd() {
     XDG_CONFIG_HOME="${XDG_CONFIG_HOME}" \
     XDG_DATA_HOME="${XDG_DATA_HOME}" \
     XDG_STATE_HOME="${XDG_STATE_HOME}" \
-    IGLOO_SHELL_VAULT_PASSPHRASE="${VAULT_PASSPHRASE}" \
+    IGLOO_SHELL_PROFILE_PASSPHRASE="${PASSPHRASE}" \
     cargo run -p igloo-shell-cli --offline -- "$@"
 }
 
@@ -96,7 +96,7 @@ if [[ ! -s "${RAW_PATH}" ]]; then
 fi
 
 managed_shell_cmd profile backup "${ALICE_PROFILE_ID}" \
-  --vault-passphrase-env IGLOO_SHELL_VAULT_PASSPHRASE >/dev/null
+  --passphrase-env IGLOO_SHELL_PROFILE_PASSPHRASE >/dev/null
 RECOVERY_PATH="${WORK_DIR}/node-e2e.bfshare"
 IGLOO_SHELL_PACKAGE_PASSWORD="node-e2e-share-password" \
   managed_shell_cmd export "${ALICE_PROFILE_ID}" \
@@ -112,7 +112,7 @@ RECOVER_JSON="$(
   managed_shell_cmd recover "${RECOVERY_PATH}" \
     --label "alice-recovered" \
     --package-secret "node-e2e-share-password" \
-    --vault-secret "${VAULT_PASSPHRASE}" \
+    --passphrase "${PASSPHRASE}" \
     --json
 )"
 RECOVERED_PROFILE_ID="$(
@@ -125,7 +125,7 @@ if [[ -z "${RECOVERED_PROFILE_ID}" ]]; then
 fi
 
 managed_shell_cmd profile backup "${BOB_PROFILE_ID}" \
-  --vault-passphrase-env IGLOO_SHELL_VAULT_PASSPHRASE >/dev/null
+  --passphrase-env IGLOO_SHELL_PROFILE_PASSPHRASE >/dev/null
 ROTATESET_SOURCE_A="${WORK_DIR}/rotate-source-alice.bfshare"
 ROTATESET_SOURCE_B="${WORK_DIR}/rotate-source-bob.bfshare"
 IGLOO_SHELL_PACKAGE_PASSWORD="rotate-source-alice-password" \
@@ -151,7 +151,7 @@ managed_shell_cmd rotate-keyset init \
   --workspace "${ROTATESET_WORKSPACE}" \
   --source-bfshare "${ROTATESET_SOURCE_A}" \
   --source-bfshare "${ROTATESET_SOURCE_B}" \
-  --vault-secret "${VAULT_PASSPHRASE}" >/dev/null
+  --passphrase "${PASSPHRASE}" >/dev/null
 
 ROTATESET_MANIFEST="${ROTATESET_WORKSPACE}/rotation.json"
 perl -0pi -e 's/"package_secret_env": null/"package_secret_env": "ROTATE_SOURCE_SECRET_A"/; s/"package_secret_env": null/"package_secret_env": "ROTATE_SOURCE_SECRET_B"/;' "${ROTATESET_MANIFEST}"
@@ -164,10 +164,10 @@ ROTATESET_JSON="$(
     XDG_CONFIG_HOME="${XDG_CONFIG_HOME}" \
     XDG_DATA_HOME="${XDG_DATA_HOME}" \
     XDG_STATE_HOME="${XDG_STATE_HOME}" \
-    IGLOO_SHELL_VAULT_PASSPHRASE="${VAULT_PASSPHRASE}" \
+    IGLOO_SHELL_PROFILE_PASSPHRASE="${PASSPHRASE}" \
     cargo run -p igloo-shell-cli --offline -- rotate-keyset generate \
       --workspace "${ROTATESET_WORKSPACE}" \
-      --vault-secret "${VAULT_PASSPHRASE}" \
+      --passphrase "${PASSPHRASE}" \
       --distribution-secret "rotate-keyset-password" \
       --daemon \
       --json
@@ -202,7 +202,7 @@ ROTATESET_ONBOARDED_JSON="$(
   managed_shell_cmd onboard "${ROTATESET_ONBOARD_PATH}" \
     --label "rotate-keyset-onboarded" \
     --onboard-secret "rotate-keyset-password" \
-    --vault-secret "${VAULT_PASSPHRASE}" \
+    --passphrase "${PASSPHRASE}" \
     --json
 )"
 ROTATESET_ONBOARDED_ID="$(
@@ -220,7 +220,7 @@ ROTATE_JSON="$(
   managed_shell_cmd rotate-key "${ROTATESET_ROTATE_PATH}" \
     --profile "${BOB_PROFILE_ID}" \
     --onboard-secret "rotate-keyset-password" \
-    --vault-secret "${VAULT_PASSPHRASE}" \
+    --passphrase "${PASSPHRASE}" \
     --daemon \
     --json
 )"

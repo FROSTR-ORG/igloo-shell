@@ -53,7 +53,10 @@ fn export_formats_write_expected_artifacts_and_validate_required_flags() {
             "--out",
             support::path_arg(&harness.root().join("missing-password.bfprofile")),
         ],
-        &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+        &[(
+            "IGLOO_SHELL_PROFILE_PASSPHRASE",
+            "encrypted-profile-passphrase",
+        )],
     );
     assert!(missing_password.stderr.contains("package password"));
 
@@ -70,7 +73,10 @@ fn export_formats_write_expected_artifacts_and_validate_required_flags() {
         ],
         &[
             ("IGLOO_SHELL_PACKAGE_PASSWORD", "onboard-pass"),
-            ("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase"),
+            (
+                "IGLOO_SHELL_PROFILE_PASSPHRASE",
+                "encrypted-profile-passphrase",
+            ),
         ],
     );
     assert!(
@@ -88,7 +94,10 @@ fn export_formats_write_expected_artifacts_and_validate_required_flags() {
             "--out",
             support::path_arg(&harness.root().join("bogus.out")),
         ],
-        &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+        &[(
+            "IGLOO_SHELL_PROFILE_PASSPHRASE",
+            "encrypted-profile-passphrase",
+        )],
     );
     assert!(
         invalid_format
@@ -134,7 +143,9 @@ fn profile_commands_cover_list_show_doctor_backup_and_remove() {
         Some(true)
     );
     assert_eq!(
-        doctor.get("vault_record_exists").and_then(Value::as_bool),
+        doctor
+            .get("encrypted_profile_exists")
+            .and_then(Value::as_bool),
         Some(true)
     );
 
@@ -199,7 +210,10 @@ fn daemon_and_runtime_commands_cover_status_logs_restart_and_wipe_state() {
 
     let missing_yes = harness.run_expect_failure(
         &["runtime", "wipe-state", "--profile", &alice_id],
-        &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+        &[(
+            "IGLOO_SHELL_PROFILE_PASSPHRASE",
+            "encrypted-profile-passphrase",
+        )],
     );
     assert!(
         missing_yes
@@ -213,7 +227,10 @@ fn daemon_and_runtime_commands_cover_status_logs_restart_and_wipe_state() {
     harness.stop_daemon(&alice_id);
     let stopped = harness.run_expect_failure(
         &["runtime", "status", "--profile", &alice_id],
-        &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+        &[(
+            "IGLOO_SHELL_PROFILE_PASSPHRASE",
+            "encrypted-profile-passphrase",
+        )],
     );
     assert!(stopped.stderr.contains("daemon"));
 
@@ -243,7 +260,10 @@ fn check_commands_fail_cleanly_after_daemon_stop() {
     for kind in ["onboard", "sign", "ecdh"] {
         let failure = harness.run_json_with_env(
             &["check", kind, "--profile", &alice_id],
-            &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+            &[(
+                "IGLOO_SHELL_PROFILE_PASSPHRASE",
+                "encrypted-profile-passphrase",
+            )],
         );
         assert!(
             failure.get("ready").and_then(Value::as_bool) == Some(false),
@@ -410,8 +430,12 @@ fn rotate_key_rejects_wrong_secret_invalid_package_and_mismatched_group() {
         harness.export_bfonboard_package(&bob_id, "share-carol.json", "rotate-pass");
     let valid_path = harness.save_onboarding_package("rotate-valid.bfonboard", &valid_package);
 
-    let wrong_secret =
-        harness.rotate_key_expect_failure(&valid_path, &alice_id, "wrong-pass", "vault-passphrase");
+    let wrong_secret = harness.rotate_key_expect_failure(
+        &valid_path,
+        &alice_id,
+        "wrong-pass",
+        "encrypted-profile-passphrase",
+    );
     assert!(wrong_secret.stderr.contains("decrypt"));
 
     let invalid_path =
@@ -420,7 +444,7 @@ fn rotate_key_rejects_wrong_secret_invalid_package_and_mismatched_group() {
         &invalid_path,
         &alice_id,
         "rotate-pass",
-        "vault-passphrase",
+        "encrypted-profile-passphrase",
     );
     assert!(
         invalid_package.stderr.contains("package") || invalid_package.stderr.contains("decode")
@@ -440,7 +464,7 @@ fn rotate_key_rejects_wrong_secret_invalid_package_and_mismatched_group() {
         &mismatched_path,
         &alice_id,
         "mismatch-pass",
-        "vault-passphrase",
+        "encrypted-profile-passphrase",
     );
     assert!(
         mismatched

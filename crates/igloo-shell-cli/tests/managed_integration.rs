@@ -45,7 +45,12 @@ fn onboard_with_password_flag_creates_profile() {
     let package = harness.export_bfonboard_package(&alice_id, "share-bob.json", "invite-pass");
     let package_path = harness.save_onboarding_package("bob.onboarding", &package);
 
-    let imported = harness.onboard(&package_path, "bob", "invite-pass", "vault-passphrase");
+    let imported = harness.onboard(
+        &package_path,
+        "bob",
+        "invite-pass",
+        "encrypted-profile-passphrase",
+    );
     let bob_id = extract_profile_id(&imported);
     let imported_payload = imported.get("import").expect("onboard import payload");
     let bob = imported_payload
@@ -99,7 +104,7 @@ fn exported_bfonboard_round_trips_through_shell_onboard() {
         &package_path,
         "carol-roundtrip",
         "roundtrip-pass",
-        "vault-passphrase",
+        "encrypted-profile-passphrase",
     );
     let profile_id = extract_profile_id(&imported);
     assert_ne!(profile_id, alice_id);
@@ -256,7 +261,7 @@ fn rotate_keyset_init_and_generate_replace_local_profile_and_emit_bfonboard_pack
         std::path::Path::new(&onboard_path),
         "rotated-carol",
         "rotate-distribution-pass",
-        "vault-passphrase",
+        "encrypted-profile-passphrase",
     );
     let onboarded_id = extract_profile_id(&onboarded);
     harness.start_daemon(&onboarded_id);
@@ -271,7 +276,7 @@ fn rotate_keyset_init_and_generate_replace_local_profile_and_emit_bfonboard_pack
         std::path::Path::new(&rotate_path),
         &bob_id,
         "rotate-distribution-pass",
-        "vault-passphrase",
+        "encrypted-profile-passphrase",
     );
     let rotated_bob_id = extract_profile_id(&rotated_bob);
     assert_ne!(rotated_bob_id, bob_id);
@@ -297,12 +302,12 @@ fn profile_load_without_runtime_start_prints_next_commands() {
         "profile",
         "load",
         &alice_id,
-        "--vault-secret",
-        "vault-passphrase",
+        "--passphrase",
+        "encrypted-profile-passphrase",
     ]);
 
     assert!(result.stdout.contains("Profile loaded:"));
-    assert!(result.stdout.contains("Vault unlock succeeded."));
+    assert!(result.stdout.contains("Passphrase accepted."));
     assert!(
         result
             .stdout
@@ -321,7 +326,10 @@ fn profile_load_without_runtime_start_prints_next_commands() {
 
     let status = harness.run_expect_failure(
         &["daemon", "status", "--profile", &alice_id],
-        &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+        &[(
+            "IGLOO_SHELL_PROFILE_PASSPHRASE",
+            "encrypted-profile-passphrase",
+        )],
     );
     assert!(status.stderr.contains("daemon metadata is not present"));
 }
@@ -340,8 +348,8 @@ fn profile_load_with_daemon_starts_background_runtime() {
         "profile",
         "load",
         &alice_id,
-        "--vault-secret",
-        "vault-passphrase",
+        "--passphrase",
+        "encrypted-profile-passphrase",
         "--daemon",
     ]);
 
@@ -382,8 +390,8 @@ fn import_non_json_prints_next_commands_and_exits() {
         label,
         "--relay-profile",
         "local",
-        "--vault-secret",
-        "vault-passphrase",
+        "--passphrase",
+        "encrypted-profile-passphrase",
     ]);
 
     assert!(result.stdout.contains("Import complete."));
@@ -409,8 +417,8 @@ fn import_with_start_attaches_to_daemon_log() {
             "alice-start",
             "--relay-profile",
             "local",
-            "--vault-secret",
-            "vault-passphrase",
+            "--passphrase",
+            "encrypted-profile-passphrase",
             "--start",
         ],
         &[],
@@ -448,10 +456,13 @@ fn recover_non_json_prints_next_commands_and_exits() {
             "profile",
             "backup",
             &alice_id,
-            "--vault-passphrase-env",
-            "IGLOO_SHELL_VAULT_PASSPHRASE",
+            "--passphrase-env",
+            "IGLOO_SHELL_PROFILE_PASSPHRASE",
         ],
-        &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+        &[(
+            "IGLOO_SHELL_PROFILE_PASSPHRASE",
+            "encrypted-profile-passphrase",
+        )],
     );
     let share = harness.export_bfshare_package(&alice_id, "recover-pass");
     let share_path = harness.save_onboarding_package("alice.bfshare", &share);
@@ -463,8 +474,8 @@ fn recover_non_json_prints_next_commands_and_exits() {
         "alice-recovered",
         "--package-secret",
         "recover-pass",
-        "--vault-secret",
-        "vault-passphrase",
+        "--passphrase",
+        "encrypted-profile-passphrase",
     ]);
 
     assert!(result.stdout.contains("Recovery complete."));
@@ -486,10 +497,13 @@ fn recover_with_start_attaches_to_daemon_log() {
             "profile",
             "backup",
             &alice_id,
-            "--vault-passphrase-env",
-            "IGLOO_SHELL_VAULT_PASSPHRASE",
+            "--passphrase-env",
+            "IGLOO_SHELL_PROFILE_PASSPHRASE",
         ],
-        &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+        &[(
+            "IGLOO_SHELL_PROFILE_PASSPHRASE",
+            "encrypted-profile-passphrase",
+        )],
     );
     let share = harness.export_bfshare_package(&alice_id, "recover-pass");
     let share_path = harness.save_onboarding_package("alice-start.bfshare", &share);
@@ -502,8 +516,8 @@ fn recover_with_start_attaches_to_daemon_log() {
             "alice-recover-start",
             "--package-secret",
             "recover-pass",
-            "--vault-secret",
-            "vault-passphrase",
+            "--passphrase",
+            "encrypted-profile-passphrase",
             "--start",
         ],
         &[],
@@ -544,7 +558,12 @@ fn rotate_key_replaces_profile_with_bfonboard() {
     let package = harness.export_bfonboard_package(&bob_id, "share-carol.json", "rotate-pass");
     let package_path = harness.save_onboarding_package("alice-rotate.onboarding", &package);
 
-    let rotated = harness.rotate_key(&package_path, &alice_id, "rotate-pass", "vault-passphrase");
+    let rotated = harness.rotate_key(
+        &package_path,
+        &alice_id,
+        "rotate-pass",
+        "encrypted-profile-passphrase",
+    );
     let new_profile_id = extract_profile_id(&rotated);
     let expected_load = format!("igloo-shell profile load {new_profile_id}");
 
@@ -601,8 +620,8 @@ fn rotate_key_with_daemon_starts_replacement_runtime() {
         &alice_id,
         "--onboard-secret",
         "rotate-pass",
-        "--vault-secret",
-        "vault-passphrase",
+        "--passphrase",
+        "encrypted-profile-passphrase",
         "--daemon",
     ]);
 
@@ -644,8 +663,8 @@ fn rotate_key_with_start_attaches_to_daemon_log() {
             &alice_id,
             "--onboard-secret",
             "rotate-pass",
-            "--vault-secret",
-            "vault-passphrase",
+            "--passphrase",
+            "encrypted-profile-passphrase",
             "--start",
         ],
         &[],
@@ -680,8 +699,8 @@ fn onboard_non_json_with_daemon_starts_background_runtime() {
         "bob-daemon",
         "--onboard-secret",
         "invite-pass",
-        "--vault-secret",
-        "vault-passphrase",
+        "--passphrase",
+        "encrypted-profile-passphrase",
         "--daemon",
     ]);
 
@@ -728,8 +747,8 @@ fn onboard_with_start_attaches_to_daemon_log() {
             "bob-start",
             "--onboard-secret",
             "invite-pass",
-            "--vault-secret",
-            "vault-passphrase",
+            "--passphrase",
+            "encrypted-profile-passphrase",
             "--start",
         ],
         &[],
@@ -759,8 +778,8 @@ fn keygen_non_json_prints_artifact_summary_and_exits() {
         "alice-keygen",
         "--relay-url",
         harness.relay_url(),
-        "--vault-secret",
-        "vault-passphrase",
+        "--passphrase",
+        "encrypted-profile-passphrase",
         "--distribution-secret",
         "dist-passphrase",
     ]);
@@ -844,14 +863,16 @@ fn onboard_supports_secret_file_input() {
     let package_path = harness.save_onboarding_package("carol.onboarding", &package);
     let onboard_secret_path =
         harness.save_onboarding_package("carol.onboard-secret", "setup-pass\n");
-    let vault_secret_path =
-        harness.save_onboarding_package("carol.vault-secret", "vault-passphrase\n");
+    let passphrase_path = harness.save_onboarding_package(
+        "carol.encrypted-profile-secret",
+        "encrypted-profile-passphrase\n",
+    );
 
     let imported = harness.onboard_with_secret_files(
         &package_path,
         "carol",
         &onboard_secret_path,
-        &vault_secret_path,
+        &passphrase_path,
     );
     let carol_id = extract_profile_id(&imported);
     let onboard_payload = imported.get("import").expect("onboard import payload");
@@ -887,8 +908,8 @@ fn onboard_requires_label_on_non_tty() {
             support::path_arg(&package_path),
             "--onboard-secret",
             "invite-pass",
-            "--vault-secret",
-            "vault-passphrase",
+            "--passphrase",
+            "encrypted-profile-passphrase",
             "--json",
         ],
         &[],
@@ -911,8 +932,12 @@ fn onboard_accepts_inline_package_payload() {
 
     let package = harness.export_bfonboard_package(&alice_id, "share-dave.json", "inline-pass");
 
-    let imported =
-        harness.onboard_inline(&package, "dave-inline", "inline-pass", "vault-passphrase");
+    let imported = harness.onboard_inline(
+        &package,
+        "dave-inline",
+        "inline-pass",
+        "encrypted-profile-passphrase",
+    );
     let profile_id = extract_profile_id(&imported);
 
     harness.start_daemon(&profile_id);
@@ -938,8 +963,8 @@ fn onboard_without_onboard_secret_flags_fails_on_non_tty() {
         &[
             "onboard",
             support::path_arg(&package_path),
-            "--vault-secret",
-            "vault-passphrase",
+            "--passphrase",
+            "encrypted-profile-passphrase",
             "--label",
             "carol-prompt",
         ],
@@ -954,8 +979,8 @@ fn onboard_without_onboard_secret_flags_fails_on_non_tty() {
 }
 
 #[test]
-fn onboard_without_vault_secret_flags_fails_on_non_tty() {
-    let mut harness = TestHarness::new("onboard-no-vault-secret");
+fn onboard_without_passphrase_flags_fails_on_non_tty() {
+    let mut harness = TestHarness::new("onboard-no-encrypted-profile-secret");
     harness.start_relay();
     harness.keygen(2, 4);
     harness.set_relay_profile("local");
@@ -965,30 +990,28 @@ fn onboard_without_vault_secret_flags_fails_on_non_tty() {
     harness.start_daemon(&alice_id);
     harness.wait_for_runtime(&alice_id, Duration::from_secs(20));
 
-    let package = harness.export_bfonboard_package(&alice_id, "share-dave.json", "vault-pass");
-    let package_path = harness.save_onboarding_package("dave-vault-prompt.onboarding", &package);
+    let package =
+        harness.export_bfonboard_package(&alice_id, "share-dave.json", "encrypted-profile-pass");
+    let package_path =
+        harness.save_onboarding_package("dave-encrypted-profile-prompt.onboarding", &package);
 
     let failure = harness.run_expect_failure(
         &[
             "onboard",
             support::path_arg(&package_path),
             "--onboard-secret",
-            "vault-pass",
+            "encrypted-profile-pass",
             "--label",
-            "dave-vault-prompt",
+            "dave-encrypted-profile-prompt",
         ],
         &[],
     );
 
-    assert!(
-        failure
-            .stderr
-            .contains("--vault-secret / --vault-secret-file")
-    );
+    assert!(failure.stderr.contains("--passphrase / --passphrase-file"));
 }
 
 #[test]
-fn onboarding_import_with_wrong_password_leaves_no_profiles_or_vault_records() {
+fn onboarding_import_with_wrong_password_leaves_no_profiles_or_encrypted_profiles() {
     let mut harness = TestHarness::new("onboarding-wrong-password");
     harness.start_relay();
     harness.keygen(2, 4);
@@ -1008,8 +1031,8 @@ fn onboarding_import_with_wrong_password_leaves_no_profiles_or_vault_records() {
             support::path_arg(&package_path),
             "--onboard-secret",
             "wrong-pass",
-            "--vault-secret",
-            "vault-passphrase",
+            "--passphrase",
+            "encrypted-profile-passphrase",
             "--label",
             "dave",
         ],
@@ -1021,7 +1044,7 @@ fn onboarding_import_with_wrong_password_leaves_no_profiles_or_vault_records() {
         harness.list_profiles().as_array().map(|items| items.len()),
         Some(1)
     );
-    let vault_entries = std::fs::read_dir(harness.vault_dir())
+    let vault_entries = std::fs::read_dir(harness.encrypted_profiles_dir())
         .map(|entries| entries.count())
         .unwrap_or(0);
     assert_eq!(vault_entries, 2);
@@ -1051,7 +1074,10 @@ fn managed_runtime_e2e_covers_ping_onboard_sign_and_ecdh() {
 
     let peers = harness.run_json_with_env(
         &["peer", "list", "--profile", &alice_id],
-        &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+        &[(
+            "IGLOO_SHELL_PROFILE_PASSPHRASE",
+            "encrypted-profile-passphrase",
+        )],
     );
     let peer_pubkeys = peers
         .as_array()
@@ -1065,11 +1091,17 @@ fn managed_runtime_e2e_covers_ping_onboard_sign_and_ecdh() {
     for peer in &peer_pubkeys {
         harness.run_json_with_env(
             &["peer", "ping", "--profile", &alice_id, peer],
-            &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+            &[(
+                "IGLOO_SHELL_PROFILE_PASSPHRASE",
+                "encrypted-profile-passphrase",
+            )],
         );
         harness.run_json_with_env(
             &["peer", "onboard", "--profile", &alice_id, peer],
-            &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+            &[(
+                "IGLOO_SHELL_PROFILE_PASSPHRASE",
+                "encrypted-profile-passphrase",
+            )],
         );
     }
     harness.wait_for_sign_ready(&alice_id, Duration::from_secs(20));
@@ -1082,7 +1114,10 @@ fn managed_runtime_e2e_covers_ping_onboard_sign_and_ecdh() {
             &alice_id,
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         ],
-        &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+        &[(
+            "IGLOO_SHELL_PROFILE_PASSPHRASE",
+            "encrypted-profile-passphrase",
+        )],
     );
     let signature = sign
         .get("signatures_hex")
@@ -1094,7 +1129,10 @@ fn managed_runtime_e2e_covers_ping_onboard_sign_and_ecdh() {
 
     let ecdh = harness.run_json_with_env(
         &["runtime", "ecdh", "--profile", &alice_id, &peer_pubkeys[0]],
-        &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+        &[(
+            "IGLOO_SHELL_PROFILE_PASSPHRASE",
+            "encrypted-profile-passphrase",
+        )],
     );
     let secret = ecdh
         .get("shared_secret_hex32")

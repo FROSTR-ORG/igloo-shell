@@ -7,7 +7,7 @@ This file explains the local architecture and editing boundaries for `igloo-shel
 `igloo-shell` keeps a small crate split:
 
 - `crates/igloo-shell-core`
-  - shell storage, manifests, vault handling, daemon integration, package flows, and operator logic
+  - shell storage, manifests, encrypted-profile handling, daemon integration, package flows, and operator logic
 - `crates/igloo-shell-cli`
   - clap surface, prompts, rendering, and integration tests around the public CLI
 
@@ -21,7 +21,7 @@ The first-class operator concepts are:
 
 - profile
   - one local FROSTR device identity managed by the shell
-- vault
+- encrypted profile storage
   - encrypted local storage for secret artifacts
 - daemon
   - one long-lived runtime process per profile
@@ -63,7 +63,7 @@ Storage responsibilities:
   - profile manifests
 - data:
   - managed non-secret group data
-  - encrypted vault records
+  - encrypted profile records
 - state:
   - per-profile daemon metadata
   - signer/runtime state
@@ -71,18 +71,18 @@ Storage responsibilities:
 
 Do not regress toward plaintext managed share storage.
 
-## Profile and Vault Boundaries
+## Profile and Encrypted Profile Boundaries
 
 A profile manifest is the stable operator-facing record for one local device. It binds together:
 
 - one managed group package
-- one local secret share record in the vault
+- one local encrypted profile record
 - one relay profile
 - one runtime state directory
 - one daemon socket path
 - optional runtime and peer-policy overrides
 
-The vault stores secret artifacts encrypted at rest. Expected kinds include:
+Encrypted profile storage keeps secret artifacts encrypted at rest. Expected kinds include:
 
 - `share_package`
 - `onboarding_package`
@@ -93,7 +93,7 @@ The shell owns:
 - XDG storage layout
 - profile manifests
 - relay profile definitions
-- vault encryption and unlock
+- encrypted profile encryption and unlock
 - profile resolution
 - daemon lifecycle from the CLI surface
 

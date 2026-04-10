@@ -1,6 +1,6 @@
 # igloo-shell
 
-`igloo-shell` is the CLI-first operator host for FROSTR. It manages local profiles, encrypted vault material, per-profile daemons, relay profiles, onboarding, recovery, profile export, and trusted key rotation.
+`igloo-shell` is the CLI-first operator host for FROSTR. It manages local profiles, encrypted profile records, per-profile daemons, relay profiles, onboarding, recovery, profile export, and trusted key rotation.
 
 This repo is self-contained as a project manual. General FROSTR protocol and system background is documented at the workspace level.
 
@@ -11,7 +11,7 @@ This repo is self-contained as a project manual. General FROSTR protocol and sys
 ## What It Owns
 
 - managed local profiles and profile manifests
-- encrypted vault storage for secret artifacts
+- encrypted profile storage for secret artifacts
 - per-profile daemon lifecycle and runtime control
 - operator-facing package flows:
   - `onboard`

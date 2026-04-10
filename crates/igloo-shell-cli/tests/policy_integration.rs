@@ -24,7 +24,10 @@ fn live_policy_commands_persist_and_update_runtime() {
 
     let peers = harness.run_json_with_env(
         &["peer", "list", "--profile", &alice_id],
-        &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+        &[(
+            "IGLOO_SHELL_PROFILE_PASSPHRASE",
+            "encrypted-profile-passphrase",
+        )],
     );
     let peer = peers
         .as_array()
@@ -78,7 +81,10 @@ fn live_policy_commands_persist_and_update_runtime() {
             "--value",
             "deny",
         ],
-        &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+        &[(
+            "IGLOO_SHELL_PROFILE_PASSPHRASE",
+            "encrypted-profile-passphrase",
+        )],
     );
     assert_eq!(updated.get("updated"), Some(&Value::Bool(true)));
     assert_eq!(updated.get("persisted"), Some(&Value::Bool(true)));
@@ -86,7 +92,10 @@ fn live_policy_commands_persist_and_update_runtime() {
 
     let cleared = harness.run_json_with_env(
         &["policy", "clear-peer", "--profile", &alice_id, &peer],
-        &[("IGLOO_SHELL_VAULT_PASSPHRASE", "vault-passphrase")],
+        &[(
+            "IGLOO_SHELL_PROFILE_PASSPHRASE",
+            "encrypted-profile-passphrase",
+        )],
     );
     assert_eq!(cleared.get("updated"), Some(&Value::Bool(true)));
     let manifest = harness.run_json(&["profile", "show", &alice_id]);

@@ -10,7 +10,7 @@ XDG_DATA_HOME="${WORK_DIR}/data"
 XDG_STATE_HOME="${WORK_DIR}/state"
 LOG_DIR="${WORK_DIR}/logs"
 PROFILE_FILE="${WORK_DIR}/profiles.env"
-VAULT_PASSPHRASE="${IGLOO_SHELL_VAULT_PASSPHRASE:-devnet-passphrase}"
+PASSPHRASE="${IGLOO_SHELL_PROFILE_PASSPHRASE:-devnet-passphrase}"
 
 usage() {
   cat <<USAGE
@@ -43,8 +43,8 @@ load_profiles() {
 }
 
 managed_prefix() {
-  printf "env XDG_CONFIG_HOME='%s' XDG_DATA_HOME='%s' XDG_STATE_HOME='%s' IGLOO_SHELL_VAULT_PASSPHRASE='%s'" \
-    "${XDG_CONFIG_HOME}" "${XDG_DATA_HOME}" "${XDG_STATE_HOME}" "${VAULT_PASSPHRASE}"
+  printf "env XDG_CONFIG_HOME='%s' XDG_DATA_HOME='%s' XDG_STATE_HOME='%s' IGLOO_SHELL_PROFILE_PASSPHRASE='%s'" \
+    "${XDG_CONFIG_HOME}" "${XDG_DATA_HOME}" "${XDG_STATE_HOME}" "${PASSPHRASE}"
 }
 
 create_layout() {
@@ -62,7 +62,7 @@ create_layout() {
   tmux send-keys -t "${SESSION_NAME}:demo.0" \
     "cd '${ROOT_DIR}' && clear && echo 'Relay log (Ctrl+b d to detach)' && exec tail -n +1 -f '${LOG_DIR}/relay.log'" C-m
   tmux send-keys -t "${SESSION_NAME}:demo.1" \
-    "cd '${ROOT_DIR}' && clear && exec ${env_prefix} cargo run -p igloo-shell-cli --offline -- profile load '${ALICE_PROFILE_ID}' --vault-secret '${VAULT_PASSPHRASE}'" C-m
+    "cd '${ROOT_DIR}' && clear && exec ${env_prefix} cargo run -p igloo-shell-cli --offline -- profile load '${ALICE_PROFILE_ID}' --passphrase '${PASSPHRASE}'" C-m
   tmux send-keys -t "${SESSION_NAME}:demo.2" \
     "cd '${ROOT_DIR}' && clear && exec ${env_prefix} cargo run -p igloo-shell-cli --offline -- daemon logs --follow --profile '${BOB_PROFILE_ID}'" C-m
   tmux send-keys -t "${SESSION_NAME}:demo.3" \
