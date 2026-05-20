@@ -1,5 +1,6 @@
 use std::fs;
 use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -9,19 +10,20 @@ use bifrost_app::host::{
     RuntimeDiagnosticsSnapshot, ShutdownPayload, SignPayload, UpdatedPayload, WipedPayload,
 };
 use bifrost_app::native_runtime::DaemonMetadata;
+use bifrost_core::secret::{DaemonToken, Passphrase};
 use bifrost_core::types::PeerPolicyOverride;
 use bifrost_signer::{
     DeviceConfig, PeerStatus, RuntimeMetadata, RuntimeReadiness, RuntimeStatusSummary,
 };
+use rand_core::OsRng;
 use serde_json::Value;
 use tokio::time::Duration;
 
 use super::{
-    PROFILE_PASSPHRASE_ENV, ProfileManifest, ShellPaths, load_share_payload,
-    load_share_payload_with_passphrase, now_unix_secs, parse_group_package, parse_share_package,
-    read_daemon_metadata, read_profile, read_relay_profile, remove_daemon_metadata,
-    resolve_profile_peers_and_overrides, shorten_unix_socket_path, validate_profile_unlock,
-    write_daemon_metadata,
+    ProfileManifest, ShellPaths, load_share_payload, load_share_payload_with_passphrase,
+    now_unix_secs, parse_group_package, parse_share_package, read_daemon_metadata, read_profile,
+    read_relay_profile, remove_daemon_metadata, resolve_profile_peers_and_overrides,
+    shorten_unix_socket_path, validate_profile_unlock, write_daemon_metadata,
 };
 use bifrost_app::runtime::{AppOptions, ResolvedAppConfig};
 
@@ -63,7 +65,7 @@ pub fn resolve_profile_runtime(
 pub fn resolve_profile_runtime_for_passphrase(
     paths: &ShellPaths,
     profile_id: &str,
-    passphrase: Option<String>,
+    passphrase: Option<&Passphrase>,
 ) -> Result<(ProfileManifest, ResolvedAppConfig)> {
     let profile = read_profile(paths, profile_id)?;
     let relay_profile = read_relay_profile(paths, &profile.relay_profile)?;
@@ -97,9 +99,11 @@ pub fn resolve_profile_runtime_for_passphrase(
 #[cfg(unix)]
 pub fn daemon_client(paths: &ShellPaths, profile_id: &str) -> Result<DaemonClient> {
     let metadata = read_daemon_metadata(paths, profile_id)?;
+    let token = DaemonToken::from_hex(&metadata.token)
+        .context("parse daemon.json token (run daemon stop && start to regenerate)")?;
     Ok(DaemonClient::new(
         PathBuf::from(metadata.socket_path),
-        metadata.token,
+        token,
     ))
 }
 
@@ -107,27 +111,38 @@ pub fn daemon_log_path(paths: &ShellPaths, profile_id: &str) -> PathBuf {
     paths.daemon_log_path(profile_id)
 }
 
-pub fn build_daemon_transport(profile: &ProfileManifest) -> DaemonTransportConfig {
-    let socket_path = shorten_unix_socket_path(&profile.daemon_socket_path, &profile.id);
-    DaemonTransportConfig {
+/// Build a fresh `DaemonTransportConfig` for `profile`.
+///
+/// Bucket C C.4: the token is a 256-bit `OsRng`-derived `DaemonToken`. The
+/// previous predictable `daemon-{id}-{ts}` form is gone.
+pub fn build_daemon_transport(profile: &ProfileManifest) -> Result<DaemonTransportConfig> {
+    let socket_path = shorten_unix_socket_path(&profile.daemon_socket_path, &profile.id)
+        .map_err(|err| anyhow!(err))?;
+    let mut rng = OsRng;
+    Ok(DaemonTransportConfig {
         socket_path,
-        token: format!("daemon-{}-{}", profile.id, now_unix_secs()),
-    }
+        token: DaemonToken::new_random(&mut rng),
+    })
 }
 
 #[cfg(unix)]
 pub async fn start_profile_daemon_with_passphrase(
     paths: &ShellPaths,
     profile_id: &str,
-    passphrase: Option<String>,
+    passphrase: Option<Passphrase>,
 ) -> Result<DaemonMetadata> {
     paths.ensure()?;
     let profile = read_profile(paths, profile_id)?;
-    validate_profile_unlock(paths, &profile, passphrase.clone())?;
-    let transport = build_daemon_transport(&profile);
+    // Validate the passphrase unlocks the profile before paying the daemon
+    // spawn cost. `validate_profile_unlock` takes `Option<&Passphrase>`.
+    validate_profile_unlock(paths, &profile, passphrase.as_ref())?;
+    let transport = build_daemon_transport(&profile)?;
     let log_path = paths.daemon_log_path(profile_id);
     if let Some(parent) = log_path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        // C.1: daemon log dir lives next to the daemon metadata; tighten to
+        // 0o700 to match the surrounding profile state tree.
+        bifrost_profile::fs_guard::ensure_dir_restricted(parent, 0o700)
+            .with_context(|| format!("create {}", parent.display()))?;
     }
 
     let stdout = OpenOptions::new()
@@ -135,7 +150,31 @@ pub async fn start_profile_daemon_with_passphrase(
         .append(true)
         .open(&log_path)
         .with_context(|| format!("open {}", log_path.display()))?;
+    // C.1: the log file is open()-on-create, so chmod it explicitly. The
+    // O_APPEND semantics rule out using `write_restricted_bytes_atomic`
+    // here, so set 0o600 directly. Subsequent appends inherit the perms.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o600));
+    }
     let stderr = stdout.try_clone().context("clone daemon log handle")?;
+
+    // C.4: write the daemon metadata (containing the expected token) BEFORE
+    // spawning the child so it can read `daemon.json` keyed by `--profile`
+    // and learn its expected token. The `--token` argv has been retired.
+    let metadata_pre = DaemonMetadata {
+        profile_id: profile_id.to_string(),
+        // pid filled in after spawn — but we need the file present before
+        // the child looks at it. Stash 0 as a placeholder; we overwrite the
+        // record with the real pid once we know it.
+        pid: 0,
+        socket_path: transport.socket_path.display().to_string(),
+        token: transport.token.to_hex(),
+        log_path: log_path.display().to_string(),
+        started_at: now_unix_secs(),
+    };
+    write_daemon_metadata(paths, profile_id, &metadata_pre)?;
+
     let exe = std::env::current_exe().context("resolve current executable")?;
     let mut command = Command::new(exe);
     command
@@ -144,28 +183,51 @@ pub async fn start_profile_daemon_with_passphrase(
         .arg(profile_id)
         .arg("--socket-path")
         .arg(&transport.socket_path)
-        .arg("--token")
-        .arg(&transport.token)
+        // C.5: pipe the passphrase via stdin (closed after the write) — the
+        // child's `read_passphrase_from_stdin` helper consumes one
+        // newline-terminated line. No env-var passphrase contract.
+        .stdin(Stdio::piped())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
-    if let Some(passphrase) = &passphrase {
-        command.env(PROFILE_PASSPHRASE_ENV, passphrase);
-    }
     let mut child = command.spawn().context("spawn igloo-shell daemon")?;
+
+    // Write the passphrase to the child's stdin and close the pipe.
+    if let Some(mut child_stdin) = child.stdin.take() {
+        if let Some(pass) = passphrase.as_ref() {
+            child_stdin
+                .write_all(pass.expose_bytes())
+                .context("write passphrase to daemon stdin")?;
+            child_stdin
+                .write_all(b"\n")
+                .context("write passphrase newline to daemon stdin")?;
+        }
+        // Dropping the handle closes the pipe (EOF for the child reader).
+        drop(child_stdin);
+    }
+    // Passphrase is zeroized on drop here.
+    drop(passphrase);
 
     let metadata = DaemonMetadata {
         profile_id: profile_id.to_string(),
         pid: child.id(),
         socket_path: transport.socket_path.display().to_string(),
-        token: transport.token.clone(),
+        token: transport.token.to_hex(),
         log_path: log_path.display().to_string(),
-        started_at: now_unix_secs(),
+        started_at: metadata_pre.started_at,
     };
+    // Overwrite the placeholder with the real pid.
     write_daemon_metadata(paths, profile_id, &metadata)?;
 
-    let client = DaemonClient::new(PathBuf::from(&metadata.socket_path), metadata.token.clone());
+    let client = DaemonClient::new(
+        PathBuf::from(&metadata.socket_path),
+        transport.token.clone_secret(),
+    );
+    // Bucket B Argon2id KDF runs once in the parent (validate_profile_unlock)
+    // and once in the child (resolve_profile_runtime_with_unlock_session),
+    // both with m=256MB / t=4. On contended hosts that easily stretches
+    // past 5s. Poll for up to 30s (300 × 100ms) before giving up.
     let mut last_error = None;
-    for _ in 0..50 {
+    for _ in 0..300 {
         match client.runtime_metadata().await {
             Ok(_) => return Ok(metadata),
             Err(err) => last_error = Some(err.to_string()),

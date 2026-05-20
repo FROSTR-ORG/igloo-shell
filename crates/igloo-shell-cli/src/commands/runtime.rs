@@ -2,8 +2,24 @@ use super::super::*;
 
 pub async fn handle_daemon(paths: &ShellPaths, command: DaemonCommands) -> Result<()> {
     match command {
-        DaemonCommands::Start { profile } => {
-            let metadata = start_profile_daemon(paths, &profile).await?;
+        DaemonCommands::Start {
+            profile,
+            passphrase,
+            passphrase_file,
+        } => {
+            // C.5: collect the passphrase via --passphrase / --passphrase-file
+            // / TTY prompt / piped stdin and hand it to the daemon spawn,
+            // which pipes it through stdin to the child.
+            let passphrase = resolve_passphrase_source_with(
+                passphrase,
+                passphrase_file,
+                std::io::stdin().is_terminal(),
+                "encrypted-profile-secret",
+                "daemon start requires passphrase input; use --passphrase / --passphrase-file, pipe it via stdin, or run on a TTY",
+                prompt_load_passphrase,
+            )?;
+            let metadata =
+                start_profile_daemon_with_passphrase(paths, &profile, Some(passphrase)).await?;
             print_json(&metadata)
         }
         DaemonCommands::Stop { profile } => {
@@ -14,9 +30,22 @@ pub async fn handle_daemon(paths: &ShellPaths, command: DaemonCommands) -> Resul
                 "result": result,
             }))
         }
-        DaemonCommands::Restart { profile } => {
+        DaemonCommands::Restart {
+            profile,
+            passphrase,
+            passphrase_file,
+        } => {
+            let passphrase = resolve_passphrase_source_with(
+                passphrase,
+                passphrase_file,
+                std::io::stdin().is_terminal(),
+                "encrypted-profile-secret",
+                "daemon restart requires passphrase input; use --passphrase / --passphrase-file, pipe it via stdin, or run on a TTY",
+                prompt_load_passphrase,
+            )?;
             let _ = stop_profile_daemon(paths, &profile).await;
-            let metadata = start_profile_daemon(paths, &profile).await?;
+            let metadata =
+                start_profile_daemon_with_passphrase(paths, &profile, Some(passphrase)).await?;
             print_json(&serde_json::json!({
                 "restarted": true,
                 "profile": profile,

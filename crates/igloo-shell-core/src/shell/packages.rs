@@ -3,7 +3,7 @@ use super::*;
 pub(crate) fn profile_to_package_payload(
     paths: &ShellPaths,
     profile_id: &str,
-    passphrase: Option<String>,
+    passphrase: Option<&Passphrase>,
 ) -> Result<BfProfilePayload> {
     let profile = read_profile(paths, profile_id)?;
     let (manifest, resolved) =
@@ -21,7 +21,7 @@ pub(crate) fn profile_to_package_payload(
         version: 1,
         device: BfProfileDevice {
             name: manifest.label,
-            share_secret: hex::encode(resolved.share.seckey),
+            share_secret: hex::encode(resolved.share.seckey.expose_bytes()),
             manual_peer_policy_overrides,
             relays: resolved.relays,
         },
@@ -64,9 +64,11 @@ pub(crate) fn preview_from_bootstrap_completion(
     source: &'static str,
     peer_pubkey: Option<String>,
 ) -> Result<ProfilePreview> {
-    let share_public_key = derive_member_pubkey_hex(completion.share.seckey)?;
+    let share_public_key = derive_member_pubkey_hex(*completion.share.seckey.expose_bytes())?;
     Ok(ProfilePreview {
-        profile_id: derive_profile_id_for_share_secret(&hex::encode(completion.share.seckey))?,
+        profile_id: derive_profile_id_for_share_secret(&hex::encode(
+            completion.share.seckey.expose_bytes(),
+        ))?,
         label: label.unwrap_or_else(|| format!("Onboarded Device {}", completion.share.idx)),
         share_public_key,
         group_public_key: hex::encode(completion.group.group_pk),
@@ -87,8 +89,21 @@ pub(crate) fn build_policy_overrides_value(
 pub(crate) fn write_package_output(out_path: Option<&Path>, package: &str) -> Result<()> {
     if let Some(path) = out_path {
         if let Some(parent) = path.parent() {
+            // C.1/C.2: bfprofile / bfshare / bfonboard packages hold the
+            // share's encrypted material plus the package-password KDF
+            // params. The package is itself encrypted, but a 0o600 perm
+            // bit on the on-disk artifact avoids accidental mode leakage
+            // when the operator hands the file off to another host.
+            #[cfg(unix)]
+            bifrost_profile::fs_guard::ensure_dir_restricted(parent, 0o700)
+                .with_context(|| format!("create {}", parent.display()))?;
+            #[cfg(not(unix))]
             fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
         }
+        #[cfg(unix)]
+        bifrost_profile::fs_guard::write_restricted_bytes_atomic(path, package.as_bytes(), 0o600)
+            .with_context(|| format!("write {}", path.display()))?;
+        #[cfg(not(unix))]
         fs::write(path, package).with_context(|| format!("write {}", path.display()))?;
     }
     Ok(())

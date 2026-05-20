@@ -20,7 +20,7 @@ pub async fn handle_rotate_key(paths: &ShellPaths, args: RotateKeyArgs) -> Resul
         &old_profile_id,
         &package_raw,
         onboarding_secret,
-        Some(passphrase.clone()),
+        Some(&passphrase),
     )
     .await?;
 
@@ -32,8 +32,10 @@ pub async fn handle_rotate_key(paths: &ShellPaths, args: RotateKeyArgs) -> Resul
     }
 
     let daemon = if args.daemon {
+        // passphrase cloned: ensure_profile_daemon owns the stdin handoff;
+        // we keep our `passphrase` for the optional follow-on `--start`.
         let (metadata, existing) =
-            ensure_profile_daemon(paths, &new_profile_id, Some(passphrase.clone())).await?;
+            ensure_profile_daemon(paths, &new_profile_id, Some(passphrase.clone_secret())).await?;
         Some((metadata, existing))
     } else {
         None
@@ -83,12 +85,12 @@ pub async fn handle_rotate_key(paths: &ShellPaths, args: RotateKeyArgs) -> Resul
 
 fn handle_rotate_keyset_init(paths: &ShellPaths, args: RotateKeysetInitArgs) -> Result<()> {
     let stdin_is_terminal = std::io::stdin().is_terminal();
-    let passphrase = resolve_secret_source_with(
+    let passphrase = resolve_passphrase_source_with(
         args.passphrase,
         args.passphrase_file,
         stdin_is_terminal,
         "encrypted-profile-secret",
-        "rotate-keyset init requires passphrase input; use --passphrase / --passphrase-file, or run on a TTY",
+        "rotate-keyset init requires passphrase input; use --passphrase / --passphrase-file, pipe it via stdin, or run on a TTY",
         prompt_load_passphrase,
     )?;
     let workspace_root = args
@@ -102,7 +104,7 @@ fn handle_rotate_keyset_init(paths: &ShellPaths, args: RotateKeysetInitArgs) -> 
         args.count,
         &workspace_root,
         args.source_bfshares,
-        Some(passphrase),
+        Some(&passphrase),
     )?;
     let status = inspect_rotation_workspace(&workspace_root, &document);
     if args.json {
@@ -145,12 +147,12 @@ async fn handle_rotate_keyset_generate(
     let workspace_root = PathBuf::from(&args.workspace);
     let document = load_rotation_workspace(&workspace_root)?;
     let stdin_is_terminal = std::io::stdin().is_terminal();
-    let passphrase = resolve_secret_source_with(
+    let passphrase = resolve_passphrase_source_with(
         args.passphrase,
         args.passphrase_file,
         stdin_is_terminal,
         "encrypted-profile-secret",
-        "rotate-keyset generate requires passphrase input; use --passphrase / --passphrase-file, or run on a TTY",
+        "rotate-keyset generate requires passphrase input; use --passphrase / --passphrase-file, pipe it via stdin, or run on a TTY",
         prompt_load_passphrase,
     )?;
     let source_passwords = resolve_rotation_source_passwords(&document, stdin_is_terminal)?;
@@ -165,7 +167,7 @@ async fn handle_rotate_keyset_generate(
             stdin_is_terminal,
             "distribution-secret",
             "rotate-keyset generate requires onboarding package secret input; use --distribution-secret / --distribution-secret-file, or run on a TTY",
-            prompt_distribution_secret,
+            || prompt_distribution_secret().map(|p| p.expose_secret().to_string()),
         )?)
     } else {
         None
@@ -175,14 +177,16 @@ async fn handle_rotate_keyset_generate(
         paths,
         &workspace_root,
         source_passwords,
-        Some(passphrase.clone()),
+        Some(&passphrase),
         distribution_secret,
     )
     .await?;
 
     let daemon = if args.daemon {
+        // passphrase cloned: ensure_profile_daemon owns the stdin handoff.
         let (metadata, existing) =
-            ensure_profile_daemon(paths, &result.profile.id, Some(passphrase.clone())).await?;
+            ensure_profile_daemon(paths, &result.profile.id, Some(passphrase.clone_secret()))
+                .await?;
         Some((metadata, existing))
     } else {
         None
@@ -269,12 +273,12 @@ pub async fn handle_keygen(paths: &ShellPaths, args: KeygenArgs) -> Result<()> {
         prompt_profile_label,
     )?;
     let relay_urls = resolve_keygen_relays(args.relay_urls, stdin_is_terminal)?;
-    let passphrase = resolve_secret_source_with(
+    let passphrase = resolve_passphrase_source_with(
         args.passphrase,
         args.passphrase_file,
         stdin_is_terminal,
         "encrypted-profile-secret",
-        "keygen requires passphrase input; use --passphrase / --passphrase-file, or run on a TTY",
+        "keygen requires passphrase input; use --passphrase / --passphrase-file, pipe it via stdin, or run on a TTY",
         prompt_passphrase,
     )?;
     let distribution_secret = resolve_secret_source_with(
@@ -283,7 +287,7 @@ pub async fn handle_keygen(paths: &ShellPaths, args: KeygenArgs) -> Result<()> {
         stdin_is_terminal,
         "distribution-secret",
         "keygen requires onboarding package secret input; use --distribution-secret / --distribution-secret-file, or run on a TTY",
-        prompt_distribution_secret,
+        || prompt_distribution_secret().map(|p| p.expose_secret().to_string()),
     )?;
     let import = import_generated_share(
         paths,
@@ -291,7 +295,10 @@ pub async fn handle_keygen(paths: &ShellPaths, args: KeygenArgs) -> Result<()> {
         member_index,
         label,
         relay_urls.clone(),
-        Some(passphrase.clone()),
+        // passphrase cloned: bifrost-profile consumes the Passphrase for
+        // the encrypted profile envelope; we keep ours for the backup +
+        // daemon spawn below.
+        Some(passphrase.clone_secret()),
     )?;
     let profile = result_profile(&import)?.clone();
     if let Err(err) = publish_profile_backup(paths, &profile.id, None).await {
@@ -301,6 +308,11 @@ pub async fn handle_keygen(paths: &ShellPaths, args: KeygenArgs) -> Result<()> {
         .state_dir
         .join("generated-onboarding")
         .join(&profile.id);
+    // C.1: directory holds generated onboarding packages; tighten to 0o700.
+    #[cfg(unix)]
+    bifrost_profile::fs_guard::ensure_dir_restricted(&export_root, 0o700)
+        .with_context(|| format!("create {}", export_root.display()))?;
+    #[cfg(not(unix))]
     fs::create_dir_all(&export_root)
         .with_context(|| format!("create {}", export_root.display()))?;
     let selected_share = draft
@@ -321,6 +333,12 @@ pub async fn handle_keygen(paths: &ShellPaths, args: KeygenArgs) -> Result<()> {
             distribution_secret.clone(),
         )?;
         let path = export_root.join(format!("member-{}.bfonboard.txt", share.member_idx));
+        // C.1: bfonboard packages are encrypted but treated as secret-bearing.
+        // Atomic 0o600 write via fs_guard.
+        #[cfg(unix)]
+        bifrost_profile::fs_guard::write_restricted_bytes_atomic(&path, package.as_bytes(), 0o600)
+            .with_context(|| format!("write {}", path.display()))?;
+        #[cfg(not(unix))]
         fs::write(&path, &package).with_context(|| format!("write {}", path.display()))?;
         packages.push(serde_json::json!({
             "member_idx": share.member_idx,

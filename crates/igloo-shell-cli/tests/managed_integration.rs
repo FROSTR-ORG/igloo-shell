@@ -324,13 +324,8 @@ fn profile_load_without_runtime_start_prints_next_commands() {
             .contains(&format!("igloo-shell daemon status --profile {alice_id}"))
     );
 
-    let status = harness.run_expect_failure(
-        &["daemon", "status", "--profile", &alice_id],
-        &[(
-            "IGLOO_SHELL_PROFILE_PASSPHRASE",
-            "encrypted-profile-passphrase",
-        )],
-    );
+    // C.5: daemon status reads daemon.json only; no passphrase needed.
+    let status = harness.run_expect_failure(&["daemon", "status", "--profile", &alice_id], &[]);
     assert!(status.stderr.contains("daemon metadata is not present"));
 }
 
@@ -457,12 +452,9 @@ fn recover_non_json_prints_next_commands_and_exits() {
             "backup",
             &alice_id,
             "--passphrase-env",
-            "IGLOO_SHELL_PROFILE_PASSPHRASE",
+            "BACKUP_PASS",
         ],
-        &[(
-            "IGLOO_SHELL_PROFILE_PASSPHRASE",
-            "encrypted-profile-passphrase",
-        )],
+        &[("BACKUP_PASS", "encrypted-profile-passphrase")],
     );
     let share = harness.export_bfshare_package(&alice_id, "recover-pass");
     let share_path = harness.save_onboarding_package("alice.bfshare", &share);
@@ -498,12 +490,9 @@ fn recover_with_start_attaches_to_daemon_log() {
             "backup",
             &alice_id,
             "--passphrase-env",
-            "IGLOO_SHELL_PROFILE_PASSPHRASE",
+            "BACKUP_PASS",
         ],
-        &[(
-            "IGLOO_SHELL_PROFILE_PASSPHRASE",
-            "encrypted-profile-passphrase",
-        )],
+        &[("BACKUP_PASS", "encrypted-profile-passphrase")],
     );
     let share = harness.export_bfshare_package(&alice_id, "recover-pass");
     let share_path = harness.save_onboarding_package("alice-start.bfshare", &share);
@@ -1072,13 +1061,9 @@ fn managed_runtime_e2e_covers_ping_onboard_sign_and_ecdh() {
     harness.wait_for_runtime(&bob_id, Duration::from_secs(20));
     harness.wait_for_runtime(&carol_id, Duration::from_secs(20));
 
-    let peers = harness.run_json_with_env(
-        &["peer", "list", "--profile", &alice_id],
-        &[(
-            "IGLOO_SHELL_PROFILE_PASSPHRASE",
-            "encrypted-profile-passphrase",
-        )],
-    );
+    // C.5: peer / runtime subcommands talk to the running daemon over
+    // the control socket — no profile passphrase needed.
+    let peers = harness.run_json(&["peer", "list", "--profile", &alice_id]);
     let peer_pubkeys = peers
         .as_array()
         .expect("peer list array")
@@ -1089,36 +1074,18 @@ fn managed_runtime_e2e_covers_ping_onboard_sign_and_ecdh() {
     assert_eq!(peer_pubkeys.len(), 2);
 
     for peer in &peer_pubkeys {
-        harness.run_json_with_env(
-            &["peer", "ping", "--profile", &alice_id, peer],
-            &[(
-                "IGLOO_SHELL_PROFILE_PASSPHRASE",
-                "encrypted-profile-passphrase",
-            )],
-        );
-        harness.run_json_with_env(
-            &["peer", "onboard", "--profile", &alice_id, peer],
-            &[(
-                "IGLOO_SHELL_PROFILE_PASSPHRASE",
-                "encrypted-profile-passphrase",
-            )],
-        );
+        harness.run_json(&["peer", "ping", "--profile", &alice_id, peer]);
+        harness.run_json(&["peer", "onboard", "--profile", &alice_id, peer]);
     }
     harness.wait_for_sign_ready(&alice_id, Duration::from_secs(20));
 
-    let sign = harness.run_json_with_env(
-        &[
-            "runtime",
-            "sign",
-            "--profile",
-            &alice_id,
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        ],
-        &[(
-            "IGLOO_SHELL_PROFILE_PASSPHRASE",
-            "encrypted-profile-passphrase",
-        )],
-    );
+    let sign = harness.run_json(&[
+        "runtime",
+        "sign",
+        "--profile",
+        &alice_id,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ]);
     let signature = sign
         .get("signatures_hex")
         .and_then(Value::as_array)
@@ -1127,13 +1094,7 @@ fn managed_runtime_e2e_covers_ping_onboard_sign_and_ecdh() {
         .expect("signature hex");
     assert_eq!(signature.len(), 128);
 
-    let ecdh = harness.run_json_with_env(
-        &["runtime", "ecdh", "--profile", &alice_id, &peer_pubkeys[0]],
-        &[(
-            "IGLOO_SHELL_PROFILE_PASSPHRASE",
-            "encrypted-profile-passphrase",
-        )],
-    );
+    let ecdh = harness.run_json(&["runtime", "ecdh", "--profile", &alice_id, &peer_pubkeys[0]]);
     let secret = ecdh
         .get("shared_secret_hex32")
         .and_then(Value::as_str)

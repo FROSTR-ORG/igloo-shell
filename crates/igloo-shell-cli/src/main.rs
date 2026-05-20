@@ -5,8 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use bifrost_app::host::{LogOptions, init_tracing, run_resolved_daemon};
-use bifrost_app::native_runtime::resolve_profile_runtime;
+use bifrost_app::host::{LogOptions, init_tracing};
 use bifrost_core::types::PolicyOverrideValue;
 use bifrost_profile::{
     ProfilePaths as ShellPaths, export_profile, export_profile_as_bfonboard,
@@ -29,8 +28,8 @@ use igloo_shell_core::shell::{
     export_generated_onboarding_package, generate_rotation_workspace, import_generated_share,
     import_profile_from_onboarding_value, inspect_rotation_workspace, list_profiles,
     load_relay_profiles, load_rotation_workspace, load_shell_config, read_daemon_metadata,
-    read_profile, remove_daemon_metadata, remove_profile, remove_relays, replace_relay_profile, run_setup,
-    set_default_relay_profile, set_profile_default_policy_override,
+    read_profile, remove_daemon_metadata, remove_profile, remove_relays, replace_relay_profile,
+    run_setup, set_default_relay_profile, set_profile_default_policy_override,
     set_profile_peer_policy_override, start_profile_daemon, start_profile_daemon_with_passphrase,
     stop_profile_daemon, stop_profile_daemon_typed, test_relay_connectivity,
     validate_profile_unlock_with_passphrase,
@@ -147,6 +146,12 @@ enum DaemonCommands {
     Start {
         #[arg(long)]
         profile: String,
+        /// Provide the profile passphrase explicitly (else read from stdin
+        /// when stdin is a pipe, or prompt on TTY).
+        #[arg(long, conflicts_with = "passphrase_file")]
+        passphrase: Option<String>,
+        #[arg(long, conflicts_with = "passphrase")]
+        passphrase_file: Option<String>,
     },
     Stop {
         #[arg(long)]
@@ -155,6 +160,10 @@ enum DaemonCommands {
     Restart {
         #[arg(long)]
         profile: String,
+        #[arg(long, conflicts_with = "passphrase_file")]
+        passphrase: Option<String>,
+        #[arg(long, conflicts_with = "passphrase")]
+        passphrase_file: Option<String>,
     },
     Status {
         #[arg(long)]
@@ -548,12 +557,26 @@ struct DaemonRunArgs {
     profile: String,
     #[arg(long)]
     socket_path: String,
-    #[arg(long)]
-    token: String,
+    // C.4: `--token` argv was removed; the daemon child now reads its
+    // expected token from `daemon.json` keyed by `--profile`. Keep this
+    // comment in place so anyone grep-ing for `--token` finds the rationale.
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // C.1: tighten the process-wide umask before any file creation. Every
+    // subsequent `OpenOptions::create()`, profile manifest write, daemon
+    // metadata write, etc. inherits 0o600/0o700 defaults from this single
+    // syscall. The explicit chmod helpers in `bifrost_profile::fs_guard`
+    // are belt-and-braces — this is the suspenders.
+    //
+    // SAFETY: `libc::umask` is FFI to a single process-global mutator with
+    // no other side effects.
+    #[cfg(unix)]
+    unsafe {
+        libc::umask(0o077);
+    }
+
     let cli = Cli::parse();
     configure_trace_env(&cli.trace)?;
     init_tracing(log_options(&cli.trace));
@@ -585,14 +608,48 @@ async fn main() -> Result<()> {
 }
 
 async fn handle_daemon_run(paths: &ShellPaths, args: DaemonRunArgs) -> Result<()> {
-    let (_profile, mut resolved) = resolve_profile_runtime(paths, &args.profile)?;
+    // C.4: read the expected token from `daemon.json` keyed by --profile.
+    // The parent wrote the metadata before spawn (0o600, atomic), so by
+    // the time we run here the file is in place. We refuse to start if
+    // the token is malformed — operator must restart the daemon to
+    // regenerate the file.
+    let metadata = bifrost_app::native_runtime::read_daemon_metadata(paths, &args.profile)
+        .context("read daemon.json for expected token")?;
+    let token = bifrost_core::secret::DaemonToken::from_hex(&metadata.token)
+        .context("parse expected token from daemon.json")?;
+
+    // C.5: read the passphrase from stdin (newline-terminated). The parent
+    // writes the passphrase and then closes the pipe before we get here.
+    // If stdin is empty (legacy plaintext profile), `Passphrase` is None.
+    let passphrase = match bifrost_app::host::read_passphrase_from_stdin() {
+        Ok(p) => Some(p),
+        Err(bifrost_app::host::DaemonStartupError::PassphraseStdinClosed) => None,
+        Err(err) => return Err(anyhow!("read daemon passphrase: {err}")),
+    };
+
+    // C.6: resolve the profile under the supplied passphrase, holding an
+    // UnlockSession for the daemon's lifetime so subsequent re-decrypts
+    // skip the Argon2id KDF.
+    let (_profile, mut resolved, unlock_session) =
+        bifrost_app::native_runtime::resolve_profile_runtime_with_unlock_session(
+            paths,
+            &args.profile,
+            passphrase,
+        )?;
     resolved.state_path = std::path::PathBuf::from(&resolved.state_path);
-    run_resolved_daemon(
+
+    let transport = bifrost_app::host::DaemonTransportConfig {
+        socket_path: args.socket_path.into(),
+        token,
+    };
+
+    // C.7: pass `paths` so the daemon scans the rotation intent journal on
+    // startup. Pass the optional unlock session for C.6.
+    bifrost_app::host::run_resolved_daemon_with_session(
         resolved,
-        bifrost_app::host::DaemonTransportConfig {
-            socket_path: args.socket_path.into(),
-            token: args.token,
-        },
+        transport,
+        unlock_session,
+        Some(paths),
     )
     .await
 }
