@@ -669,9 +669,11 @@ fn rotate_key_with_start_attaches_to_daemon_log() {
     );
 
     let new_profile_id =
-        harness.wait_for_replaced_profile_id(&alice_label, &alice_id, Duration::from_secs(20));
+        harness.wait_for_replaced_profile_id(&alice_label, &alice_id, Duration::from_secs(30));
     assert_ne!(new_profile_id, alice_id);
-    harness.wait_for_runtime(&new_profile_id, Duration::from_secs(20));
+    // C.6: the rotated profile's daemon must run Argon2id again during
+    // signer-state init; bump the readiness timeout accordingly.
+    harness.wait_for_runtime(&new_profile_id, Duration::from_secs(45));
 }
 
 #[test]
