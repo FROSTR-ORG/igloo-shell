@@ -10,7 +10,9 @@ XDG_DATA_HOME="${WORK_DIR}/data"
 XDG_STATE_HOME="${WORK_DIR}/state"
 LOG_DIR="${WORK_DIR}/logs"
 PROFILE_FILE="${WORK_DIR}/profiles.env"
-PASSPHRASE="${IGLOO_SHELL_PROFILE_PASSPHRASE:-devnet-passphrase}"
+# Bucket C C.5: igloo-shell no longer reads a global passphrase env var.
+# The tmux helper uses --passphrase explicitly in the panes it spawns.
+PASSPHRASE="${IGLOO_SHELL_DEVNET_PASSPHRASE:-devnet-passphrase}"
 
 usage() {
   cat <<USAGE
@@ -43,8 +45,8 @@ load_profiles() {
 }
 
 managed_prefix() {
-  printf "env XDG_CONFIG_HOME='%s' XDG_DATA_HOME='%s' XDG_STATE_HOME='%s' IGLOO_SHELL_PROFILE_PASSPHRASE='%s'" \
-    "${XDG_CONFIG_HOME}" "${XDG_DATA_HOME}" "${XDG_STATE_HOME}" "${PASSPHRASE}"
+  printf "env XDG_CONFIG_HOME='%s' XDG_DATA_HOME='%s' XDG_STATE_HOME='%s'" \
+    "${XDG_CONFIG_HOME}" "${XDG_DATA_HOME}" "${XDG_STATE_HOME}"
 }
 
 create_layout() {

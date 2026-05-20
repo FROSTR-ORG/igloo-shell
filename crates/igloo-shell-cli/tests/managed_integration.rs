@@ -401,6 +401,10 @@ fn import_with_start_attaches_to_daemon_log() {
     harness.keygen(2, 3);
     harness.set_relay_profile("local");
 
+    // C.6: with Bucket B's Argon2id defaults (m=256MB / t=4) running once
+    // in the parent and once in the spawned daemon, the import + start
+    // sequence routinely takes >10s on contended hosts. Give the
+    // attached-mode runner enough wall clock to reach a bound socket.
     let _result = harness.run_for_a_bit_with_env(
         &[
             "import",
@@ -417,7 +421,7 @@ fn import_with_start_attaches_to_daemon_log() {
             "--start",
         ],
         &[],
-        Duration::from_secs(10),
+        Duration::from_secs(30),
     );
 
     let profiles = harness.list_profiles();
@@ -434,7 +438,7 @@ fn import_with_start_attaches_to_daemon_log() {
         .and_then(Value::as_str)
         .expect("imported profile id")
         .to_string();
-    harness.wait_for_runtime(&profile_id, Duration::from_secs(20));
+    harness.wait_for_runtime(&profile_id, Duration::from_secs(30));
 }
 
 #[test]
@@ -509,8 +513,10 @@ fn recover_with_start_attaches_to_daemon_log() {
             "encrypted-profile-passphrase",
             "--start",
         ],
+        // C.6: Argon2id runs twice (parent + spawned daemon) — give the
+        // attached-mode runner enough wall clock to reach a bound socket.
         &[],
-        Duration::from_secs(10),
+        Duration::from_secs(30),
     );
 
     let profiles = harness.list_profiles();
@@ -656,8 +662,10 @@ fn rotate_key_with_start_attaches_to_daemon_log() {
             "encrypted-profile-passphrase",
             "--start",
         ],
+        // C.6: Argon2id runs twice (parent + spawned daemon) — give the
+        // attached-mode runner enough wall clock to reach a bound socket.
         &[],
-        Duration::from_secs(10),
+        Duration::from_secs(30),
     );
 
     let new_profile_id =
@@ -740,8 +748,10 @@ fn onboard_with_start_attaches_to_daemon_log() {
             "encrypted-profile-passphrase",
             "--start",
         ],
+        // C.6: Argon2id runs twice (parent + spawned daemon) — give the
+        // attached-mode runner enough wall clock to reach a bound socket.
         &[],
-        Duration::from_secs(10),
+        Duration::from_secs(30),
     );
 
     let profile_id = harness.wait_for_profile_id_by_label("bob-start", Duration::from_secs(20));

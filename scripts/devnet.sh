@@ -14,7 +14,10 @@ PROFILE_FILE="${WORK_DIR}/profiles.env"
 RELAY_HOST="${RELAY_HOST:-127.0.0.1}"
 RELAY_PORT="${RELAY_PORT:-8194}"
 RELAY_URL="ws://${RELAY_HOST}:${RELAY_PORT}"
-PASSPHRASE="${IGLOO_SHELL_PROFILE_PASSPHRASE:-devnet-passphrase}"
+# Bucket C C.5: igloo-shell no longer reads a global passphrase env var.
+# The script accepts IGLOO_SHELL_DEVNET_PASSPHRASE as the local shell
+# convention and pipes / explicit-flags it through to the CLI.
+PASSPHRASE="${IGLOO_SHELL_DEVNET_PASSPHRASE:-devnet-passphrase}"
 
 mkdir -p "${WORK_DIR}" "${LOG_DIR}"
 
@@ -55,8 +58,18 @@ managed_shell_cmd() {
     XDG_CONFIG_HOME="${XDG_CONFIG_HOME}" \
     XDG_DATA_HOME="${XDG_DATA_HOME}" \
     XDG_STATE_HOME="${XDG_STATE_HOME}" \
-    IGLOO_SHELL_PROFILE_PASSPHRASE="${PASSPHRASE}" \
     cargo run -p igloo-shell-cli --offline -- "$@"
+}
+
+# Bucket C C.5: pipe the passphrase via stdin for subcommands that need
+# to unlock the profile (daemon start/restart). The CLI auto-detects a
+# non-TTY stdin and reads one newline-terminated line.
+managed_shell_cmd_with_passphrase() {
+  env \
+    XDG_CONFIG_HOME="${XDG_CONFIG_HOME}" \
+    XDG_DATA_HOME="${XDG_DATA_HOME}" \
+    XDG_STATE_HOME="${XDG_STATE_HOME}" \
+    cargo run -p igloo-shell-cli --offline -- "$@" <<<"${PASSPHRASE}"
 }
 
 parse_json_field() {
@@ -192,8 +205,8 @@ wait_for_runtime() {
 start_profile_daemon() {
   local label="$1"
   local profile_id="$2"
-  managed_shell_cmd daemon start --profile "${profile_id}" >/dev/null
-  if ! wait_for_runtime "${profile_id}" 20; then
+  managed_shell_cmd_with_passphrase daemon start --profile "${profile_id}" >/dev/null
+  if ! wait_for_runtime "${profile_id}" 30; then
     echo "error: ${label} daemon did not become queryable" >&2
     exit 1
   fi
@@ -309,11 +322,13 @@ run_smoke() {
 
   local onboard_path="${WORK_DIR}/smoke.bfonboard"
   IGLOO_SHELL_PACKAGE_PASSWORD="smoke-password" \
+    DEVNET_PASSPHRASE="${PASSPHRASE}" \
     managed_shell_cmd export "${ALICE_PROFILE_ID}" \
       --format bfonboard \
       --out "${onboard_path}" \
       --recipient-share "${MATERIAL_DIR}/share-bob.json" \
-      --package-password-env IGLOO_SHELL_PACKAGE_PASSWORD >/dev/null
+      --package-password-env IGLOO_SHELL_PACKAGE_PASSWORD \
+      --passphrase-env DEVNET_PASSPHRASE >/dev/null
   if [[ ! -s "${onboard_path}" ]]; then
     echo "error: failed to export canonical bfonboard package" >&2
     exit 1
