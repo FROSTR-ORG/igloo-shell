@@ -662,18 +662,21 @@ fn rotate_key_with_start_attaches_to_daemon_log() {
             "encrypted-profile-passphrase",
             "--start",
         ],
-        // C.6: Argon2id runs twice (parent + spawned daemon) — give the
-        // attached-mode runner enough wall clock to reach a bound socket.
+        // C.6: the rotate-key --start flow Argon2-derives once to read
+        // alice's current profile, once to write the rotated profile,
+        // and once more inside the spawned daemon's signer-state init.
+        // 60s of wall clock keeps the test honest without flaking on
+        // contended hosts.
         &[],
-        Duration::from_secs(30),
+        Duration::from_secs(60),
     );
 
     let new_profile_id =
-        harness.wait_for_replaced_profile_id(&alice_label, &alice_id, Duration::from_secs(30));
+        harness.wait_for_replaced_profile_id(&alice_label, &alice_id, Duration::from_secs(60));
     assert_ne!(new_profile_id, alice_id);
     // C.6: the rotated profile's daemon must run Argon2id again during
     // signer-state init; bump the readiness timeout accordingly.
-    harness.wait_for_runtime(&new_profile_id, Duration::from_secs(45));
+    harness.wait_for_runtime(&new_profile_id, Duration::from_secs(60));
 }
 
 #[test]
