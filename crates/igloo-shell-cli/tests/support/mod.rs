@@ -840,6 +840,12 @@ impl TestHarness {
         command.env("XDG_CONFIG_HOME", self.config_home());
         command.env("XDG_DATA_HOME", self.data_home());
         command.env("XDG_STATE_HOME", self.state_home());
+        // Test-only: opt the spawned CLI (and the daemon it spawns, which inherits
+        // this env) into bifrost-rs's debug-build fast-KDF path so each managed
+        // integration test doesn't pay the production 256 MiB Argon2id cost twice.
+        // Honored only in debug builds via `cfg(debug_assertions)`; release binaries
+        // ignore it. See bifrost-profile `Argon2Params::for_new_envelope`.
+        command.env("BIFROST_TEST_FAST_KDF", "1");
         for (key, value) in extra_env {
             command.env(key, value);
         }
