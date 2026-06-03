@@ -1,6 +1,12 @@
 use super::super::*;
+use bifrost_core::secret::Passphrase;
 
-pub fn prompt_hidden_secret(lines: &[&str], prompt: &str) -> Result<String> {
+/// Prompt the operator for a hidden secret, returning a [`Passphrase`].
+///
+/// Bucket C C.3: the secret leaves the `String` accumulator buffer
+/// immediately by being moved into `Passphrase`, which zeroizes on drop and
+/// keeps the buffer out of `Debug` output.
+pub fn prompt_hidden_secret(lines: &[&str], prompt: &str) -> Result<Passphrase> {
     for line in lines {
         println!("{line}");
     }
@@ -30,7 +36,7 @@ pub fn prompt_hidden_secret(lines: &[&str], prompt: &str) -> Result<String> {
     if password.is_empty() {
         bail!("secret input cannot be empty");
     }
-    Ok(password)
+    Ok(Passphrase::new(password))
 }
 
 pub fn prompt_profile_label() -> Result<String> {
@@ -52,7 +58,7 @@ pub fn prompt_profile_label() -> Result<String> {
     }
 }
 
-pub fn prompt_onboarding_secret() -> Result<String> {
+pub fn prompt_onboarding_secret() -> Result<Passphrase> {
     prompt_hidden_secret(
         &[
             "This onboarding package is encrypted.",
@@ -62,7 +68,7 @@ pub fn prompt_onboarding_secret() -> Result<String> {
     )
 }
 
-pub fn prompt_passphrase() -> Result<String> {
+pub fn prompt_passphrase() -> Result<Passphrase> {
     loop {
         let secret = prompt_hidden_secret(
             &[
@@ -75,14 +81,15 @@ pub fn prompt_passphrase() -> Result<String> {
             &["Retype the passphrase to confirm your input."],
             "Confirm passphrase",
         )?;
-        if secret == confirm {
+        if secret.expose_secret() == confirm.expose_secret() {
+            // `confirm` drops here, zeroizing its buffer.
             return Ok(secret);
         }
         println!("Passphrases did not match. Please try again.");
     }
 }
 
-pub fn prompt_load_passphrase() -> Result<String> {
+pub fn prompt_load_passphrase() -> Result<Passphrase> {
     prompt_hidden_secret(
         &[
             "Type the passphrase for the selected profile now.",
@@ -92,7 +99,7 @@ pub fn prompt_load_passphrase() -> Result<String> {
     )
 }
 
-pub fn prompt_package_secret() -> Result<String> {
+pub fn prompt_package_secret() -> Result<Passphrase> {
     prompt_hidden_secret(
         &[
             "This package is encrypted.",
@@ -102,7 +109,7 @@ pub fn prompt_package_secret() -> Result<String> {
     )
 }
 
-pub fn prompt_distribution_secret() -> Result<String> {
+pub fn prompt_distribution_secret() -> Result<Passphrase> {
     prompt_hidden_secret(
         &[
             "The remaining generated shares will be written as onboarding packages.",
@@ -112,7 +119,7 @@ pub fn prompt_distribution_secret() -> Result<String> {
     )
 }
 
-pub fn prompt_rotation_source_package_secret(package_path: &str) -> Result<String> {
+pub fn prompt_rotation_source_package_secret(package_path: &str) -> Result<Passphrase> {
     prompt_hidden_secret(
         &[
             "This rotation source package is encrypted.",

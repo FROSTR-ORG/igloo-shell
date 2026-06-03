@@ -6,10 +6,7 @@ pub fn short_profile_id(profile_id: &str) -> &str {
     &profile_id[..profile_id.len().min(8)]
 }
 
-pub fn print_profile_ready_summary(
-    prefix: &str,
-    profile: &ProfileManifest,
-) {
+pub fn print_profile_ready_summary(prefix: &str, profile: &ProfileManifest) {
     println!(
         "{prefix} Profile \"{}\" ({}) is ready.",
         profile.label,
@@ -116,10 +113,7 @@ pub fn print_daemon_started_summary(
     print_running_profile_commands(&profile.id);
 }
 
-pub fn print_profile_load_summary(
-    paths: &ShellPaths,
-    profile: &ProfileManifest,
-) -> Result<()> {
+pub fn print_profile_load_summary(paths: &ShellPaths, profile: &ProfileManifest) -> Result<()> {
     println!(
         "Profile loaded: \"{}\" ({})",
         profile.label,

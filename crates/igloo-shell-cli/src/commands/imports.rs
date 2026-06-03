@@ -2,12 +2,12 @@ use super::super::*;
 
 pub async fn handle_import(paths: &ShellPaths, args: ImportArgs) -> Result<()> {
     let label = resolve_profile_label(args.label)?;
-    let passphrase = resolve_secret_source_with(
+    let passphrase = resolve_passphrase_source_with(
         args.passphrase,
         args.passphrase_file,
         std::io::stdin().is_terminal(),
         "encrypted-profile-secret",
-        "import requires passphrase input; use --passphrase / --passphrase-file, or run on a TTY",
+        "import requires passphrase input; use --passphrase / --passphrase-file, pipe it via stdin, or run on a TTY",
         prompt_passphrase,
     )?;
     let relay_profile = if args.bfprofile_or_path.is_none() {
@@ -27,7 +27,10 @@ pub async fn handle_import(paths: &ShellPaths, args: ImportArgs) -> Result<()> {
             std::path::Path::new(&share),
             Some(label.clone()),
             relay_profile,
-            Some(passphrase.clone()),
+            // passphrase cloned: bifrost-profile takes ownership of the
+            // Passphrase to feed the Argon2id KDF; we still need a copy
+            // for the daemon-spawn handoff below.
+            Some(passphrase.clone_secret()),
         )?,
         (None, None, Some(package_or_path)) => {
             let package_raw = read_package_or_inline(&package_or_path)?;
@@ -42,7 +45,9 @@ pub async fn handle_import(paths: &ShellPaths, args: ImportArgs) -> Result<()> {
                 package_secret,
                 Some(label.clone()),
                 relay_profile,
-                Some(passphrase.clone()),
+                // passphrase cloned: bifrost-profile consumes the Passphrase
+                // here; we retain ours to start the daemon below.
+                Some(passphrase.clone_secret()),
             )?
         }
         _ => bail!("import requires either <bfprofile-or-path> or both --group and --share"),
@@ -52,8 +57,11 @@ pub async fn handle_import(paths: &ShellPaths, args: ImportArgs) -> Result<()> {
             eprintln!("warning: failed to publish encrypted profile backup: {err}");
         }
         let daemon = if args.daemon {
+            // passphrase cloned: ensure_profile_daemon takes ownership to
+            // pipe the passphrase to the spawned daemon; we keep a copy
+            // for the optional follow-on `--start` flow below.
             let (metadata, existing) =
-                ensure_profile_daemon(paths, &profile.id, Some(passphrase.clone())).await?;
+                ensure_profile_daemon(paths, &profile.id, Some(passphrase.clone_secret())).await?;
             Some((metadata, existing))
         } else {
             None
@@ -88,26 +96,26 @@ pub async fn handle_import(paths: &ShellPaths, args: ImportArgs) -> Result<()> {
 }
 
 pub fn handle_export(paths: &ShellPaths, args: ExportArgs) -> Result<()> {
-    let passphrase = load_secret_from_env(args.passphrase_env)?;
+    let passphrase = load_passphrase_from_env(args.passphrase_env)?;
     let result = match args.format.as_str() {
         "raw" => serde_json::to_value(export_profile(
             paths,
             &args.profile_id,
             std::path::Path::new(&args.out),
-            passphrase,
+            passphrase.as_ref(),
         )?)?,
         "bfprofile" => serde_json::to_value(export_profile_as_bfprofile(
             paths,
             &args.profile_id,
             require_env_secret(args.package_password_env, "package password")?,
-            passphrase,
+            passphrase.as_ref(),
             Some(std::path::Path::new(&args.out)),
         )?)?,
         "bfshare" => serde_json::to_value(export_profile_as_bfshare(
             paths,
             &args.profile_id,
             require_env_secret(args.package_password_env, "package password")?,
-            passphrase,
+            passphrase.as_ref(),
             Some(std::path::Path::new(&args.out)),
         )?)?,
         "bfonboard" => {
@@ -123,7 +131,7 @@ pub fn handle_export(paths: &ShellPaths, args: ExportArgs) -> Result<()> {
                     Some(args.relay_urls)
                 },
                 require_env_secret(args.package_password_env, "package password")?,
-                passphrase,
+                passphrase.as_ref(),
                 Some(std::path::Path::new(&args.out)),
             )?)?
         }
@@ -142,12 +150,12 @@ pub async fn handle_recover(paths: &ShellPaths, args: RecoverArgs) -> Result<()>
         args.package_secret_file,
         "recover requires package secret input; use --package-secret / --package-secret-file, or run on a TTY",
     )?;
-    let passphrase = resolve_secret_source_with(
+    let passphrase = resolve_passphrase_source_with(
         args.passphrase,
         args.passphrase_file,
         std::io::stdin().is_terminal(),
         "encrypted-profile-secret",
-        "recover requires passphrase input; use --passphrase / --passphrase-file, or run on a TTY",
+        "recover requires passphrase input; use --passphrase / --passphrase-file, pipe it via stdin, or run on a TTY",
         prompt_passphrase,
     )?;
     let label = resolve_profile_label(args.label)?;
@@ -157,7 +165,9 @@ pub async fn handle_recover(paths: &ShellPaths, args: RecoverArgs) -> Result<()>
         package_secret,
         Some(label),
         None,
-        Some(passphrase.clone()),
+        // passphrase cloned: bifrost-profile consumes the Passphrase; we
+        // keep a copy to spawn the daemon below.
+        Some(passphrase.clone_secret()),
     )
     .await?;
     if let Ok(profile) = result_profile(&import) {
@@ -165,8 +175,9 @@ pub async fn handle_recover(paths: &ShellPaths, args: RecoverArgs) -> Result<()>
             eprintln!("warning: failed to publish encrypted profile backup: {err}");
         }
         let daemon = if args.daemon {
+            // passphrase cloned: daemon spawn consumes its copy via stdin.
             let (metadata, existing) =
-                ensure_profile_daemon(paths, &profile.id, Some(passphrase.clone())).await?;
+                ensure_profile_daemon(paths, &profile.id, Some(passphrase.clone_secret())).await?;
             Some((metadata, existing))
         } else {
             None
@@ -215,7 +226,7 @@ pub async fn handle_setup(paths: &ShellPaths, args: SetupArgs) -> Result<()> {
             onboarding_package_path: None,
             label: args.label,
             relay_profile,
-            passphrase: load_secret_from_env(args.passphrase_env)?,
+            passphrase: load_passphrase_from_env(args.passphrase_env)?,
             onboarding_password: None,
         },
         args.start_daemon,
@@ -234,15 +245,19 @@ pub async fn handle_onboard(paths: &ShellPaths, args: OnboardArgs) -> Result<()>
         &package_raw,
         Some(label),
         None,
-        Some(passphrase.clone()),
+        // passphrase cloned: onboarding consumes the Passphrase to write
+        // the encrypted profile envelope; we retain ours to spawn the
+        // daemon below.
+        Some(passphrase.clone_secret()),
         Some(onboarding_secret),
     )
     .await?;
     let profile = result_profile(&import)?;
     let profile_id = profile.id.clone();
     let daemon = if args.daemon {
+        // passphrase cloned: daemon spawn consumes its copy via stdin.
         let (metadata, existing) =
-            ensure_profile_daemon(paths, &profile_id, Some(passphrase.clone())).await?;
+            ensure_profile_daemon(paths, &profile_id, Some(passphrase.clone_secret())).await?;
         Some((metadata, existing))
     } else {
         None

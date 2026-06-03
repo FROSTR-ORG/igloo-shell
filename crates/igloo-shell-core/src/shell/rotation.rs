@@ -7,7 +7,7 @@ pub fn finalize_rotation_update_import(
     target_payload: BfProfilePayload,
     rotated_group: &bifrost_core::types::GroupPackage,
     rotated_payload: BfProfilePayload,
-    passphrase: Option<String>,
+    passphrase: Option<&Passphrase>,
 ) -> Result<ProfileImportResult> {
     if hex::encode(rotated_group.group_pk)
         != hex::encode(group_from_payload(&target_payload)?.group_pk)
@@ -24,7 +24,9 @@ pub fn finalize_rotation_update_import(
             rotated_group,
             &rotated_payload.device.share_secret,
         )?,
-        seckey: hex_to_bytes32(&rotated_payload.device.share_secret)?,
+        seckey: bifrost_core::secret::SharePrivateKey::new(hex_to_bytes32(
+            &rotated_payload.device.share_secret,
+        )?),
     };
     let relay_profile_id = ensure_onboarding_relay_profile(
         paths,
@@ -56,6 +58,12 @@ pub fn finalize_rotation_update_import(
         build_policy_overrides_value(&rotated_payload.device.manual_peer_policy_overrides)?;
     migrated.runtime_options = target.runtime_options.clone();
     migrated.last_used_at = target.last_used_at;
+    // C.1: profile state dir holds the nonce-pool secret and signer state.
+    // Restrict to 0o700 on Unix.
+    #[cfg(unix)]
+    bifrost_profile::fs_guard::ensure_dir_restricted(&paths.profile_state_dir(&migrated.id), 0o700)
+        .with_context(|| format!("create {}", paths.profile_state_dir(&migrated.id).display()))?;
+    #[cfg(not(unix))]
     fs::create_dir_all(paths.profile_state_dir(&migrated.id))
         .with_context(|| format!("create {}", paths.profile_state_dir(&migrated.id).display()))?;
     write_profile(paths, &migrated)?;
@@ -76,10 +84,10 @@ pub async fn apply_rotation_update_from_bfonboard_value(
     target_profile_id: &str,
     package_raw: &str,
     onboarding_password: String,
-    passphrase: Option<String>,
+    passphrase: Option<&Passphrase>,
 ) -> Result<ProfileImportResult> {
     let target = read_profile(paths, target_profile_id)?;
-    let target_payload = profile_to_package_payload(paths, target_profile_id, passphrase.clone())?;
+    let target_payload = profile_to_package_payload(paths, target_profile_id, passphrase)?;
     let connection = connect_onboarding_package_preview(package_raw, onboarding_password).await?;
 
     if connection.preview.group_public_key
@@ -96,7 +104,7 @@ pub async fn apply_rotation_update_from_bfonboard_value(
         version: 1,
         device: BfProfileDevice {
             name: target.label.clone(),
-            share_secret: hex::encode(connection.completion.share.seckey),
+            share_secret: hex::encode(connection.completion.share.seckey.expose_bytes()),
             manual_peer_policy_overrides: Vec::new(),
             relays: connection.completion.relays.clone(),
         },
@@ -126,7 +134,7 @@ pub fn create_rotation_workspace(
     count: u16,
     workspace_root: &Path,
     source_package_paths: Vec<String>,
-    passphrase: Option<String>,
+    passphrase: Option<&Passphrase>,
 ) -> Result<RotationWorkspaceDocument> {
     paths.ensure()?;
     let source_profile = read_profile(paths, source_profile_id)?;
@@ -220,10 +228,23 @@ pub fn write_rotation_workspace(
     workspace_root: &Path,
     document: &RotationWorkspaceDocument,
 ) -> Result<()> {
-    fs::create_dir_all(workspace_root)
-        .with_context(|| format!("create {}", workspace_root.display()))?;
-    fs::create_dir_all(workspace_root.join("packages"))
-        .with_context(|| format!("create {}", workspace_root.join("packages").display()))?;
+    // C.1: rotation workspaces contain intermediate share material and
+    // operator-supplied package secrets paths; tighten the parent dir to
+    // 0o700 and write the manifest atomically at 0o600 (via write_json).
+    #[cfg(unix)]
+    {
+        bifrost_profile::fs_guard::ensure_dir_restricted(workspace_root, 0o700)
+            .with_context(|| format!("create {}", workspace_root.display()))?;
+        bifrost_profile::fs_guard::ensure_dir_restricted(&workspace_root.join("packages"), 0o700)
+            .with_context(|| format!("create {}", workspace_root.join("packages").display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(workspace_root)
+            .with_context(|| format!("create {}", workspace_root.display()))?;
+        fs::create_dir_all(workspace_root.join("packages"))
+            .with_context(|| format!("create {}", workspace_root.join("packages").display()))?;
+    }
     write_json(&rotation_workspace_manifest_path(workspace_root), document)
 }
 
@@ -346,7 +367,7 @@ pub async fn generate_rotation_workspace(
     paths: &ShellPaths,
     workspace_root: &Path,
     source_passwords: Vec<String>,
-    passphrase: Option<String>,
+    passphrase: Option<&Passphrase>,
     distribution_password: Option<String>,
 ) -> Result<RotationGenerateResult> {
     let document = load_rotation_workspace(workspace_root)?;
@@ -432,8 +453,7 @@ pub async fn generate_rotation_workspace(
         .clone()
         .ok_or_else(|| anyhow!("local_replace target is missing replace_profile_id"))?;
     let target = read_profile(paths, &replace_profile_id)?;
-    let target_payload =
-        profile_to_package_payload(paths, &replace_profile_id, passphrase.clone())?;
+    let target_payload = profile_to_package_payload(paths, &replace_profile_id, passphrase)?;
     let local_payload = rotation_payload_from_share(
         &rotated.next.group,
         local_share,
@@ -446,13 +466,13 @@ pub async fn generate_rotation_workspace(
         target_payload,
         &rotated.next.group,
         local_payload,
-        passphrase.clone(),
+        passphrase,
     )?;
     let profile = match import {
         ProfileImportResult::ProfileCreated { profile, .. } => profile,
         _ => bail!("rotation did not produce a local profile"),
     };
-    publish_profile_backup(paths, &profile.id, passphrase.clone()).await?;
+    publish_profile_backup(paths, &profile.id, passphrase).await?;
 
     let remote_targets = document
         .targets
@@ -468,6 +488,11 @@ pub async fn generate_rotation_workspace(
     };
 
     let packages_dir = workspace_root.join("packages");
+    // C.1: packages dir holds encrypted bfonboard outputs; tighten to 0o700.
+    #[cfg(unix)]
+    bifrost_profile::fs_guard::ensure_dir_restricted(&packages_dir, 0o700)
+        .with_context(|| format!("create {}", packages_dir.display()))?;
+    #[cfg(not(unix))]
     fs::create_dir_all(&packages_dir)
         .with_context(|| format!("create {}", packages_dir.display()))?;
     let mut generated_packages = Vec::new();
@@ -493,6 +518,10 @@ pub async fn generate_rotation_workspace(
                 packages_dir.join(format!("member-{}.bfonboard.txt", target.member_index))
             });
         if let Some(parent) = output_path.parent() {
+            #[cfg(unix)]
+            bifrost_profile::fs_guard::ensure_dir_restricted(parent, 0o700)
+                .with_context(|| format!("create {}", parent.display()))?;
+            #[cfg(not(unix))]
             fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
         }
         let package = export_rotated_onboarding_package(
@@ -544,7 +573,7 @@ pub fn create_generated_keyset_draft(
             Ok(GeneratedShareDraft {
                 member_idx: share.idx,
                 label: format!("{group_name} Device {}", share.idx),
-                share_public_key: derive_member_pubkey_hex(share.seckey)?,
+                share_public_key: derive_member_pubkey_hex(*share.seckey.expose_bytes())?,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -565,7 +594,7 @@ pub fn import_generated_share(
     member_idx: u16,
     label: String,
     relay_urls: Vec<String>,
-    passphrase: Option<String>,
+    passphrase: Option<Passphrase>,
 ) -> Result<ProfileImportResult> {
     if relay_urls.is_empty() {
         bail!("at least one relay is required");
@@ -577,8 +606,8 @@ pub fn import_generated_share(
     else {
         bail!("generated share {member_idx} not found");
     };
-    let local_pubkey = derive_member_pubkey_hex(share.seckey)?;
-    let share_secret_hex = hex::encode(share.seckey);
+    let local_pubkey = derive_member_pubkey_hex(*share.seckey.expose_bytes())?;
+    let share_secret_hex = hex::encode(share.seckey.expose_bytes());
     let payload = BfProfilePayload {
         profile_id: derive_profile_id_for_share_secret(&share_secret_hex)?,
         version: 1,
@@ -624,7 +653,7 @@ pub fn export_generated_onboarding_package(
     };
     encode_bfonboard_package(
         &BfOnboardPayload {
-            share_secret: hex::encode(share.seckey),
+            share_secret: hex::encode(share.seckey.expose_bytes()),
             relays,
             peer_pk: peer_pubkey,
         },
@@ -662,9 +691,9 @@ fn export_rotated_onboarding_package(
     }
     encode_bfonboard_package(
         &BfOnboardPayload {
-            share_secret: hex::encode(target_share.seckey),
+            share_secret: hex::encode(target_share.seckey.expose_bytes()),
             relays,
-            peer_pk: derive_member_pubkey_hex(local_share.seckey)?,
+            peer_pk: derive_member_pubkey_hex(*local_share.seckey.expose_bytes())?,
         },
         &package_password,
     )

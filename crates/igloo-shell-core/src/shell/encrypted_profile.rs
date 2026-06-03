@@ -1,12 +1,13 @@
 use std::fs;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
+use bifrost_core::secret::Passphrase;
 use bifrost_profile::{
     EncryptedProfileStore, FilesystemEncryptedProfileStore, FilesystemProfileManifestStore,
     ProfileManifestStore,
 };
 
-use super::{PROFILE_PASSPHRASE_ENV, ProfileManifest, ShellPaths, now_unix_secs};
+use super::{ProfileManifest, ShellPaths, now_unix_secs};
 
 fn encrypted_profile_store(paths: &ShellPaths) -> FilesystemEncryptedProfileStore {
     FilesystemEncryptedProfileStore::new(
@@ -38,14 +39,15 @@ pub(crate) fn store_encrypted_profile(
     kind: &str,
     source: &str,
     payload: &str,
-    passphrase: Option<String>,
+    passphrase: Option<&Passphrase>,
 ) -> Result<bifrost_profile::EncryptedProfileRecord> {
-    let passphrase = resolve_secret(passphrase, PROFILE_PASSPHRASE_ENV, "passphrase")?;
+    // C.5: env-var fallback removed; callers thread a `Passphrase` explicitly.
+    let passphrase = passphrase.ok_or_else(|| anyhow!("passphrase not provided"))?;
     encrypted_profile_store(paths).store_encrypted_profile(
         kind,
         source,
         payload,
-        &passphrase,
+        passphrase.expose_secret(),
         now_unix_secs(),
     )
 }
@@ -53,17 +55,10 @@ pub(crate) fn store_encrypted_profile(
 pub(crate) fn decrypt_encrypted_profile(
     paths: &ShellPaths,
     record: &bifrost_profile::EncryptedProfileRecord,
-    passphrase: Option<String>,
+    passphrase: Option<&Passphrase>,
 ) -> Result<String> {
-    let passphrase = resolve_secret(passphrase, PROFILE_PASSPHRASE_ENV, "passphrase")?;
-    encrypted_profile_store(paths).decrypt_encrypted_profile(record, &passphrase)
-}
-
-pub(crate) fn resolve_secret(value: Option<String>, env_name: &str, label: &str) -> Result<String> {
-    if let Some(value) = value {
-        return Ok(value);
-    }
-    std::env::var(env_name).with_context(|| format!("{label} not provided; set {env_name}"))
+    let passphrase = passphrase.ok_or_else(|| anyhow!("passphrase not provided"))?;
+    encrypted_profile_store(paths).decrypt_encrypted_profile(record, passphrase.expose_secret())
 }
 
 pub(crate) fn load_share_payload(paths: &ShellPaths, profile: &ProfileManifest) -> Result<String> {
@@ -73,7 +68,7 @@ pub(crate) fn load_share_payload(paths: &ShellPaths, profile: &ProfileManifest) 
 pub(crate) fn load_share_payload_with_passphrase(
     paths: &ShellPaths,
     profile: &ProfileManifest,
-    passphrase: Option<String>,
+    passphrase: Option<&Passphrase>,
 ) -> Result<String> {
     if let Ok(record) = read_encrypted_profile(paths, &profile.encrypted_profile_ref) {
         return decrypt_encrypted_profile(paths, &record, passphrase);
@@ -85,7 +80,7 @@ pub(crate) fn load_share_payload_with_passphrase(
 pub(crate) fn validate_profile_unlock(
     paths: &ShellPaths,
     profile: &ProfileManifest,
-    passphrase: Option<String>,
+    passphrase: Option<&Passphrase>,
 ) -> Result<()> {
     let _ = load_share_payload_with_passphrase(paths, profile, passphrase)?;
     Ok(())
@@ -94,7 +89,7 @@ pub(crate) fn validate_profile_unlock(
 pub fn validate_profile_unlock_with_passphrase(
     paths: &ShellPaths,
     profile_id: &str,
-    passphrase: Option<String>,
+    passphrase: Option<&Passphrase>,
 ) -> Result<()> {
     let profile = profile_store(paths).read_profile(profile_id)?;
     validate_profile_unlock(paths, &profile, passphrase)

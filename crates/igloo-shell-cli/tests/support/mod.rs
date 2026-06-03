@@ -131,6 +131,81 @@ impl TestHarness {
         decode_output(output)
     }
 
+    /// Run the CLI with a passphrase piped to stdin.
+    ///
+    /// Bucket C C.5: scripted invocations replace the retired global
+    /// passphrase env var with this stdin-pipe shape. Tests that
+    /// previously passed the env var should call this instead.
+    pub fn run_with_stdin(&self, args: &[&str], stdin_bytes: &[u8]) -> CommandResult {
+        use std::io::Write;
+        let mut command = self.command(args);
+        command.stdin(Stdio::piped());
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        let mut child = command.spawn().expect("spawn igloo-shell");
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(stdin_bytes).expect("write stdin");
+            stdin.write_all(b"\n").expect("write stdin newline");
+        }
+        let output = child.wait_with_output().expect("wait for igloo-shell");
+        assert!(
+            output.status.success(),
+            "command failed: {}\nstdout:\n{}\nstderr:\n{}",
+            self.render_args(args),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        decode_output(output)
+    }
+
+    /// Like [`run_with_stdin`] but also extends the child env with
+    /// `extra_env`. Convenient when a subcommand legitimately consumes a
+    /// non-passphrase env var (e.g. `--package-password-env`).
+    pub fn run_with_stdin_and_env(
+        &self,
+        args: &[&str],
+        stdin_bytes: &[u8],
+        extra_env: &[(&str, &str)],
+    ) -> CommandResult {
+        use std::io::Write;
+        let mut command = self.command_with_env(args, extra_env);
+        command.stdin(Stdio::piped());
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        let mut child = command.spawn().expect("spawn igloo-shell");
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(stdin_bytes).expect("write stdin");
+            stdin.write_all(b"\n").expect("write stdin newline");
+        }
+        let output = child.wait_with_output().expect("wait for igloo-shell");
+        assert!(
+            output.status.success(),
+            "command failed: {}\nstdout:\n{}\nstderr:\n{}",
+            self.render_args(args),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        decode_output(output)
+    }
+
+    pub fn run_json_with_stdin(&self, args: &[&str], stdin_bytes: &[u8]) -> Value {
+        self.run_with_stdin(args, stdin_bytes).json()
+    }
+
+    pub fn run_json_with_stdin_and_env(
+        &self,
+        args: &[&str],
+        stdin_bytes: &[u8],
+        extra_env: &[(&str, &str)],
+    ) -> Value {
+        self.run_with_stdin_and_env(args, stdin_bytes, extra_env)
+            .json()
+    }
+
+    /// Canonical test-side passphrase. Bucket C C.5 tests pipe this via
+    /// stdin instead of setting the retired global passphrase env var.
+    pub const TEST_PASSPHRASE: &'static str = "encrypted-profile-passphrase";
+
     pub fn run_expect_failure(&self, args: &[&str], extra_env: &[(&str, &str)]) -> CommandResult {
         let output = self
             .command_with_env(args, extra_env)
@@ -365,6 +440,11 @@ impl TestHarness {
         let out_path = self
             .root
             .join(format!("{profile_id}-{share_name}.bfonboard"));
+        // C.5: export reads the profile passphrase via --passphrase-env so
+        // it can name the env var explicitly (this is a different
+        // per-invocation env var, not the retired global one). The
+        // separate IGLOO_SHELL_PACKAGE_PASSWORD env var is the package
+        // password — also a per-invocation explicit var.
         self.run_with_env(
             &[
                 "export",
@@ -377,13 +457,12 @@ impl TestHarness {
                 path_arg(&self.material_dir().join(share_name)),
                 "--package-password-env",
                 "IGLOO_SHELL_PACKAGE_PASSWORD",
+                "--passphrase-env",
+                "EXPORT_PASSPHRASE",
             ],
             &[
                 ("IGLOO_SHELL_PACKAGE_PASSWORD", password),
-                (
-                    "IGLOO_SHELL_PROFILE_PASSPHRASE",
-                    "encrypted-profile-passphrase",
-                ),
+                ("EXPORT_PASSPHRASE", Self::TEST_PASSPHRASE),
             ],
         );
         fs::read_to_string(&out_path)
@@ -404,13 +483,12 @@ impl TestHarness {
                 path_arg(&out_path),
                 "--package-password-env",
                 "IGLOO_SHELL_PACKAGE_PASSWORD",
+                "--passphrase-env",
+                "EXPORT_PASSPHRASE",
             ],
             &[
                 ("IGLOO_SHELL_PACKAGE_PASSWORD", password),
-                (
-                    "IGLOO_SHELL_PROFILE_PASSPHRASE",
-                    "encrypted-profile-passphrase",
-                ),
+                ("EXPORT_PASSPHRASE", Self::TEST_PASSPHRASE),
             ],
         );
         fs::read_to_string(&out_path)
@@ -431,13 +509,12 @@ impl TestHarness {
                 path_arg(&out_path),
                 "--package-password-env",
                 "IGLOO_SHELL_PACKAGE_PASSWORD",
+                "--passphrase-env",
+                "EXPORT_PASSPHRASE",
             ],
             &[
                 ("IGLOO_SHELL_PACKAGE_PASSWORD", password),
-                (
-                    "IGLOO_SHELL_PROFILE_PASSPHRASE",
-                    "encrypted-profile-passphrase",
-                ),
+                ("EXPORT_PASSPHRASE", Self::TEST_PASSPHRASE),
             ],
         );
         fs::read_to_string(&out_path)
@@ -456,11 +533,10 @@ impl TestHarness {
                 "raw",
                 "--out",
                 path_arg(&out_path),
+                "--passphrase-env",
+                "EXPORT_PASSPHRASE",
             ],
-            &[(
-                "IGLOO_SHELL_PROFILE_PASSPHRASE",
-                "encrypted-profile-passphrase",
-            )],
+            &[("EXPORT_PASSPHRASE", Self::TEST_PASSPHRASE)],
         );
         out_path
     }
@@ -524,11 +600,8 @@ impl TestHarness {
         distribution_secret: &str,
         extra_env: &[(&str, &str)],
     ) -> Value {
-        let mut env = vec![(
-            "IGLOO_SHELL_PROFILE_PASSPHRASE",
-            "encrypted-profile-passphrase",
-        )];
-        env.extend_from_slice(extra_env);
+        // C.5: passphrase passed inline via --passphrase; the legacy
+        // global passphrase env var was removed in PR12.
         self.run_json_with_env(
             &[
                 "rotate-keyset",
@@ -536,12 +609,12 @@ impl TestHarness {
                 "--workspace",
                 path_arg(workspace),
                 "--passphrase",
-                "encrypted-profile-passphrase",
+                Self::TEST_PASSPHRASE,
                 "--distribution-secret",
                 distribution_secret,
                 "--json",
             ],
-            &env,
+            extra_env,
         )
     }
 
@@ -550,13 +623,9 @@ impl TestHarness {
     }
 
     pub fn stop_daemon(&self, profile_id: &str) {
-        let _ = self.run_with_env(
-            &["daemon", "stop", "--profile", profile_id],
-            &[(
-                "IGLOO_SHELL_PROFILE_PASSPHRASE",
-                "encrypted-profile-passphrase",
-            )],
-        );
+        // daemon stop just talks to the running daemon over the control
+        // socket; no profile passphrase is needed.
+        let _ = self.run(&["daemon", "stop", "--profile", profile_id]);
     }
 
     pub fn restart_daemon(&self, profile_id: &str) {
@@ -566,14 +635,10 @@ impl TestHarness {
     pub fn wait_for_runtime(&self, profile_id: &str, timeout: Duration) {
         let start = Instant::now();
         while start.elapsed() < timeout {
+            // runtime status just talks to the running daemon (no
+            // passphrase needed) — drop the legacy env var entirely.
             let output = self
-                .command_with_env(
-                    &["runtime", "status", "--profile", profile_id],
-                    &[(
-                        "IGLOO_SHELL_PROFILE_PASSPHRASE",
-                        "encrypted-profile-passphrase",
-                    )],
-                )
+                .command(&["runtime", "status", "--profile", profile_id])
                 .output()
                 .expect("run runtime status");
             if output.status.success() {
@@ -602,13 +667,8 @@ impl TestHarness {
     }
 
     pub fn run_check(&self, profile_id: &str, kind: &str) -> Value {
-        self.run_json_with_env(
-            &["check", kind, "--profile", profile_id],
-            &[(
-                "IGLOO_SHELL_PROFILE_PASSPHRASE",
-                "encrypted-profile-passphrase",
-            )],
-        )
+        // check talks to a running daemon; no passphrase needed.
+        self.run_json(&["check", kind, "--profile", profile_id])
     }
 
     pub fn render_args(&self, args: &[&str]) -> String {
@@ -624,18 +684,18 @@ impl TestHarness {
     }
 
     pub fn backup_profile(&self, profile_id: &str) -> Value {
+        // `profile backup --passphrase-env <NAME>` still works — the env
+        // var is named explicitly per-invocation, not the retired global
+        // global passphrase contract.
         self.run_json_with_env(
             &[
                 "profile",
                 "backup",
                 profile_id,
                 "--passphrase-env",
-                "IGLOO_SHELL_PROFILE_PASSPHRASE",
+                "BACKUP_PASSPHRASE",
             ],
-            &[(
-                "IGLOO_SHELL_PROFILE_PASSPHRASE",
-                "encrypted-profile-passphrase",
-            )],
+            &[("BACKUP_PASSPHRASE", Self::TEST_PASSPHRASE)],
         )
     }
 
@@ -648,14 +708,9 @@ impl TestHarness {
     }
 
     pub fn daemon_status(&self, profile_id: Option<&str>) -> Value {
+        // daemon status only reads daemon.json + talks to running daemon.
         match profile_id {
-            Some(profile_id) => self.run_json_with_env(
-                &["daemon", "status", "--profile", profile_id],
-                &[(
-                    "IGLOO_SHELL_PROFILE_PASSPHRASE",
-                    "encrypted-profile-passphrase",
-                )],
-            ),
+            Some(profile_id) => self.run_json(&["daemon", "status", "--profile", profile_id]),
             None => self.run_json(&["daemon", "status"]),
         }
     }
@@ -665,43 +720,21 @@ impl TestHarness {
     }
 
     pub fn runtime_status(&self, profile_id: &str) -> Value {
-        self.run_json_with_env(
-            &["runtime", "status", "--profile", profile_id],
-            &[(
-                "IGLOO_SHELL_PROFILE_PASSPHRASE",
-                "encrypted-profile-passphrase",
-            )],
-        )
+        // runtime status only talks to the running daemon over the
+        // control socket — no profile passphrase needed.
+        self.run_json(&["runtime", "status", "--profile", profile_id])
     }
 
     pub fn runtime_diagnostics(&self, profile_id: &str) -> Value {
-        self.run_json_with_env(
-            &["runtime", "diagnostics", "--profile", profile_id],
-            &[(
-                "IGLOO_SHELL_PROFILE_PASSPHRASE",
-                "encrypted-profile-passphrase",
-            )],
-        )
+        self.run_json(&["runtime", "diagnostics", "--profile", profile_id])
     }
 
     pub fn runtime_ops(&self, profile_id: &str) -> Value {
-        self.run_json_with_env(
-            &["runtime", "ops", "--profile", profile_id],
-            &[(
-                "IGLOO_SHELL_PROFILE_PASSPHRASE",
-                "encrypted-profile-passphrase",
-            )],
-        )
+        self.run_json(&["runtime", "ops", "--profile", profile_id])
     }
 
     pub fn runtime_wipe_state(&self, profile_id: &str) -> Value {
-        self.run_json_with_env(
-            &["runtime", "wipe-state", "--profile", profile_id, "--yes"],
-            &[(
-                "IGLOO_SHELL_PROFILE_PASSPHRASE",
-                "encrypted-profile-passphrase",
-            )],
-        )
+        self.run_json(&["runtime", "wipe-state", "--profile", profile_id, "--yes"])
     }
 
     pub fn relay_list(&self) -> Value {
@@ -807,6 +840,12 @@ impl TestHarness {
         command.env("XDG_CONFIG_HOME", self.config_home());
         command.env("XDG_DATA_HOME", self.data_home());
         command.env("XDG_STATE_HOME", self.state_home());
+        // Test-only: opt the spawned CLI (and the daemon it spawns, which inherits
+        // this env) into bifrost-rs's debug-build fast-KDF path so each managed
+        // integration test doesn't pay the production 256 MiB Argon2id cost twice.
+        // Honored only in debug builds via `cfg(debug_assertions)`; release binaries
+        // ignore it. See bifrost-profile `Argon2Params::for_new_envelope`.
+        command.env("BIFROST_TEST_FAST_KDF", "1");
         for (key, value) in extra_env {
             command.env(key, value);
         }
@@ -819,19 +858,22 @@ impl TestHarness {
     }
 
     fn run_daemon_lifecycle(&self, args: &[&str]) {
+        // C.5: daemon start/restart consume the passphrase via stdin
+        // instead of the retired global passphrase env var.
+        use std::io::Write;
         let mut last_stdout = String::new();
         let mut last_stderr = String::new();
         for _ in 0..3 {
-            let output = self
-                .command_with_env(
-                    args,
-                    &[(
-                        "IGLOO_SHELL_PROFILE_PASSPHRASE",
-                        "encrypted-profile-passphrase",
-                    )],
-                )
-                .output()
-                .expect("run daemon lifecycle command");
+            let mut command = self.command(args);
+            command.stdin(Stdio::piped());
+            command.stdout(Stdio::piped());
+            command.stderr(Stdio::piped());
+            let mut child = command.spawn().expect("spawn daemon lifecycle command");
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(Self::TEST_PASSPHRASE.as_bytes());
+                let _ = stdin.write_all(b"\n");
+            }
+            let output = child.wait_with_output().expect("wait for daemon lifecycle");
             last_stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
             last_stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             if output.status.success() {
@@ -854,14 +896,9 @@ impl Drop for TestHarness {
         if let Some(items) = profiles.as_array() {
             for item in items {
                 if let Some(profile_id) = item.get("id").and_then(Value::as_str) {
+                    // daemon stop talks to the running daemon; no passphrase.
                     let _ = self
-                        .command_with_env(
-                            &["daemon", "stop", "--profile", profile_id],
-                            &[(
-                                "IGLOO_SHELL_PROFILE_PASSPHRASE",
-                                "encrypted-profile-passphrase",
-                            )],
-                        )
+                        .command(&["daemon", "stop", "--profile", profile_id])
                         .output();
                 }
             }

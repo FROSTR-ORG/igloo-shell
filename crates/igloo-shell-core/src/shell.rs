@@ -12,6 +12,7 @@ use bifrost_codec::{
     parse_group_package, parse_share_package, wire::GroupPackageWire, wire::SharePackageWire,
 };
 use bifrost_core::get_group_id;
+use bifrost_core::secret::Passphrase;
 use bifrost_core::types::{PeerPolicy, PeerPolicyOverride};
 use frostr_utils::{
     BfManualPeerPolicyOverride, BfOnboardPayload, BfProfileDevice, BfProfilePayload,
@@ -28,19 +29,21 @@ use tokio::time::{Duration as TokioDuration, timeout};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
+use bifrost_app::native_runtime::DaemonMetadata;
 #[cfg(test)]
 use bifrost_core::types::PolicyOverrideValue;
+use bifrost_profile::{ProfileImportResult, StagedOnboardingImport};
 #[cfg(test)]
 use bifrost_profile::{
     export_profile_as_bfprofile, import_profile_from_bfprofile_value, import_profile_from_files,
 };
-use bifrost_app::native_runtime::DaemonMetadata;
-use bifrost_profile::{ProfileImportResult, StagedOnboardingImport};
 
-// Temporary shell-side convenience contract for scripts and tests.
-// Keep this env shim stable until the broader explicit-input migration lands.
-const PROFILE_PASSPHRASE_ENV: &str = "IGLOO_SHELL_PROFILE_PASSPHRASE";
-const ONBOARDING_ENV_PASSPHRASE: &str = "IGLOO_SHELL_ONBOARDING_PASSWORD";
+// Bucket C C.5: the legacy passphrase / onboarding-password env-var
+// contracts are gone end-to-end. Every host call site collects the
+// passphrase via stdin (when the daemon child is being spawned) or a TTY
+// prompt (interactive CLI) and threads it through as a
+// `bifrost_core::secret::Passphrase`. See `dev/plans/remediation-2026-04-22/
+// bucket-c-secret-hygiene.md` for the migration trail.
 
 mod checks;
 mod config;
@@ -55,9 +58,7 @@ mod relay;
 mod rotation;
 mod shared;
 
-use bifrost_profile::{
-    EncryptedProfileRecord, ProfileManifest, ProfilePreview,
-};
+use bifrost_profile::{EncryptedProfileRecord, ProfileManifest, ProfilePreview};
 pub(crate) use bifrost_profile::{PolicyOverrideEntry, PolicyOverridesDocument};
 pub use checks::{
     RelayConnectivityReport, RelayProbeResult, ShellCheckKind, ShellCheckResult,
@@ -68,17 +69,16 @@ pub use config::{
     load_shell_config, save_relay_profiles, save_shell_config,
 };
 pub use daemon::{
-    build_daemon_transport, daemon_clear_peer_policy_overrides, daemon_client,
-    daemon_ecdh, daemon_log_path, daemon_onboard, daemon_peer_status, daemon_ping,
-    daemon_runtime_config, daemon_runtime_diagnostics, daemon_runtime_metadata,
-    daemon_runtime_readiness, daemon_runtime_status, daemon_set_policy_override, daemon_sign,
-    daemon_wipe_state, resolve_profile_runtime, resolve_profile_runtime_for_passphrase,
-    start_profile_daemon, start_profile_daemon_with_passphrase, stop_profile_daemon,
-    stop_profile_daemon_typed,
+    build_daemon_transport, daemon_clear_peer_policy_overrides, daemon_client, daemon_ecdh,
+    daemon_log_path, daemon_onboard, daemon_peer_status, daemon_ping, daemon_runtime_config,
+    daemon_runtime_diagnostics, daemon_runtime_metadata, daemon_runtime_readiness,
+    daemon_runtime_status, daemon_set_policy_override, daemon_sign, daemon_wipe_state,
+    resolve_profile_runtime, resolve_profile_runtime_for_passphrase, start_profile_daemon,
+    start_profile_daemon_with_passphrase, stop_profile_daemon, stop_profile_daemon_typed,
 };
 pub(crate) use encrypted_profile::{
     decrypt_encrypted_profile, load_share_payload, load_share_payload_with_passphrase,
-    remove_encrypted_profile, resolve_secret, store_encrypted_profile, validate_profile_unlock,
+    remove_encrypted_profile, store_encrypted_profile, validate_profile_unlock,
 };
 pub use encrypted_profile::{
     read_encrypted_profile, validate_profile_unlock_with_passphrase, write_encrypted_profile,
@@ -139,14 +139,19 @@ pub struct SetupResult {
     pub daemon: Option<DaemonMetadata>,
 }
 
-#[derive(Debug, Clone)]
+/// Caller-driven setup inputs.
+///
+/// `passphrase` is a `Passphrase` (zeroize-on-drop, redacted Debug). The
+/// type does not derive `Clone`, so this struct is non-Clone — callers
+/// construct it once per invocation and let `run_setup` consume it.
+#[derive(Debug)]
 pub struct SetupRequest {
     pub group_path: Option<PathBuf>,
     pub share_path: Option<PathBuf>,
     pub onboarding_package_path: Option<PathBuf>,
     pub label: Option<String>,
     pub relay_profile: Option<String>,
-    pub passphrase: Option<String>,
+    pub passphrase: Option<Passphrase>,
     pub onboarding_password: Option<String>,
 }
 
@@ -335,6 +340,7 @@ mod tests {
             }],
             peer_permission_states: Vec::new(),
             pending_operations: Vec::new(),
+            onboarding_statuses: Vec::new(),
         }
     }
 
@@ -381,9 +387,11 @@ mod tests {
                 .read_to_end(&mut request_bytes)
                 .await
                 .expect("read request");
-            let request: ControlRequest =
-                serde_json::from_slice(&request_bytes).expect("parse control request");
-            assert_eq!(request.token, expected_token);
+            // C.4: the wire form encodes `token` as a 64-char hex string,
+            // not a free-form string. Use the canonical wire decoder.
+            let request =
+                ControlRequest::decode_wire(&request_bytes).expect("parse control request");
+            assert_eq!(request.token.to_hex(), expected_token);
             match (request.command, expected_command) {
                 (ControlCommand::RuntimeStatus, ControlCommand::RuntimeStatus)
                 | (ControlCommand::RuntimeDiagnostics, ControlCommand::RuntimeDiagnostics)
@@ -455,7 +463,9 @@ mod tests {
         let paths = test_paths("typed-daemon");
         paths.ensure().expect("ensure shell paths");
         let profile_id = "alice";
-        let token = "daemon-token";
+        // C.4: tokens are 64-char hex now; tests use a fixed byte pattern.
+        let token = "ab".repeat(32);
+        let token = token.as_str();
         let status = sample_runtime_status();
         let config = DeviceConfig::default();
 
@@ -580,7 +590,9 @@ mod tests {
         let paths = test_paths("typed-daemon-mutations");
         paths.ensure().expect("ensure shell paths");
         let profile_id = "alice";
-        let token = "daemon-token";
+        // C.4: tokens are 64-char hex now; tests use a fixed byte pattern.
+        let token = "ab".repeat(32);
+        let token = token.as_str();
 
         let sign_socket = paths.profile_state_dir(profile_id).join("sign.sock");
         write_test_daemon_metadata(&paths, profile_id, &sign_socket, token);
@@ -736,10 +748,11 @@ mod tests {
         write_profile(&paths, &profile).expect("write profile");
 
         let socket_path = paths.profile_state_dir(&profile.id).join("runtime.sock");
-        write_test_daemon_metadata(&paths, &profile.id, &socket_path, "daemon-token");
+        let hex_token: String = "ab".repeat(32);
+        write_test_daemon_metadata(&paths, &profile.id, &socket_path, &hex_token);
         let worker = spawn_fake_daemon_once(
             socket_path.clone(),
-            "daemon-token".to_string(),
+            hex_token.clone(),
             ControlCommand::RuntimeStatus,
             serde_json::to_value(sample_runtime_status()).expect("serialize runtime status"),
         )
@@ -792,7 +805,7 @@ mod tests {
     fn sample_share() -> SharePackage {
         SharePackage {
             idx: 1,
-            seckey: [3u8; 32],
+            seckey: bifrost_core::secret::SharePrivateKey::new([3u8; 32]),
         }
     }
 
@@ -813,14 +826,10 @@ mod tests {
         let group_ref = store_group_package(&paths, &sample_group()).expect("store group");
         let share_raw = serde_json::to_string_pretty(&SharePackageWire::from(sample_share()))
             .expect("serialize share");
-        let encrypted_profile = store_encrypted_profile(
-            &paths,
-            "share_package",
-            "test",
-            &share_raw,
-            Some("encrypted-profile-pass".to_string()),
-        )
-        .expect("store share");
+        let pass = Passphrase::new("encrypted-profile-pass".to_string());
+        let encrypted_profile =
+            store_encrypted_profile(&paths, "share_package", "test", &share_raw, Some(&pass))
+                .expect("store share");
         let profile = build_profile_manifest(
             &paths,
             "alice",
@@ -888,8 +897,9 @@ mod tests {
             .iter()
             .find(|member| member.idx == 1)
             .expect("alice member");
+        let share_seckey_bytes: [u8; 32] = *share.seckey.expose_bytes();
         let package = BfOnboardPayload {
-            share_secret: hex::encode(share.seckey),
+            share_secret: hex::encode(share_seckey_bytes),
             peer_pk: hex::encode(&inviter.pubkey[1..]),
             relays: vec!["ws://127.0.0.1:8194".to_string()],
         };
@@ -899,13 +909,14 @@ mod tests {
             hidden_pn: [5u8; 33],
             code: [6u8; 32],
         };
-        let mut onboarding_state = DeviceState::new(share.idx, share.seckey);
+        let mut onboarding_state = DeviceState::new(share.idx, share_seckey_bytes);
         onboarding_state
             .nonce_pool
             .store_incoming(1, vec![onboarding_nonce.clone()]);
+        let nonce_seed = bifrost_core::secret::NoncePoolSecret::new(share_seckey_bytes);
         onboarding_state
             .nonce_pool
-            .generate_for_peer(1, 4)
+            .generate_for_peer(1, 4, &nonce_seed)
             .expect("bootstrap outgoing");
 
         let result = onboarding::import_profile_from_onboarding_value_with(
@@ -913,7 +924,7 @@ mod tests {
             &encoded,
             Some("Alice".to_string()),
             Some("local".to_string()),
-            Some("encrypted-profile-pass".to_string()),
+            Some(Passphrase::new("encrypted-profile-pass".to_string())),
             Some("test-password".to_string()),
             |_| async {
                 Ok(BootstrapImportResult {
@@ -926,8 +937,10 @@ mod tests {
                     bootstrap_nonces: vec![onboarding_nonce.clone()],
                     bootstrap_state: bifrost_app::onboarding::BootstrapStateSnapshot {
                         device_state_hex: hex::encode(
-                            bincode::serialize(&onboarding_state)
-                                .expect("serialize bootstrap state"),
+                            bincode::serialize(&bifrost_signer::DeviceStatePersisted::from(
+                                &onboarding_state,
+                            ))
+                            .expect("serialize bootstrap state"),
                         ),
                     },
                 })
@@ -947,12 +960,9 @@ mod tests {
 
         assert_eq!(profile.encrypted_profile_ref, encrypted_profile.id);
         assert!(Path::new(&profile.group_ref).exists());
-        let share_raw = load_share_payload_with_passphrase(
-            &paths,
-            &profile,
-            Some("encrypted-profile-pass".to_string()),
-        )
-        .expect("decrypt share payload");
+        let pass2 = Passphrase::new("encrypted-profile-pass".to_string());
+        let share_raw = load_share_payload_with_passphrase(&paths, &profile, Some(&pass2))
+            .expect("decrypt share payload");
         let parsed_share = parse_share_package(&share_raw).expect("parse stored share");
         assert_eq!(parsed_share.idx, share.idx);
         assert!(read_encrypted_profile(&paths, &encrypted_profile.id).is_ok());
@@ -965,14 +975,11 @@ mod tests {
         assert_eq!(peer_stats.incoming_available, 1);
         assert!(peer_stats.outgoing_available >= 4);
 
-        unsafe {
-            std::env::set_var(PROFILE_PASSPHRASE_ENV, "encrypted-profile-pass");
-        }
+        // C.5: the env-var passphrase fallback is gone end-to-end. Use
+        // the explicit-passphrase resolver instead.
         let (_resolved_profile, resolved) =
-            resolve_profile_runtime(&paths, &profile.id).expect("resolve runtime");
-        unsafe {
-            std::env::remove_var(PROFILE_PASSPHRASE_ENV);
-        }
+            resolve_profile_runtime_for_passphrase(&paths, &profile.id, Some(&pass2))
+                .expect("resolve runtime");
         let signer = bifrost_app::runtime::load_or_init_signer_resolved(&resolved, &store)
             .expect("load onboarding signer");
         let runtime_peer_stats = signer.state().nonce_pool.peer_stats(1);
@@ -1012,18 +1019,19 @@ mod tests {
             &share_path,
             Some("Alice".to_string()),
             Some("local".to_string()),
-            Some("encrypted-profile-pass".to_string()),
+            Some(Passphrase::new("encrypted-profile-pass".to_string())),
         )
         .expect("import raw profile");
         let ProfileImportResult::ProfileCreated { profile, .. } = import else {
             panic!("expected profile created");
         };
 
+        let export_pass = Passphrase::new("encrypted-profile-pass".to_string());
         let exported = export_profile_as_bfprofile(
             &paths,
             &profile.id,
             "package-pass".to_string(),
-            Some("encrypted-profile-pass".to_string()),
+            Some(&export_pass),
             None,
         )
         .expect("export bfprofile");
@@ -1033,7 +1041,7 @@ mod tests {
             "package-pass".to_string(),
             Some("Recovered".to_string()),
             Some("local".to_string()),
-            Some("encrypted-profile-pass".to_string()),
+            Some(Passphrase::new("encrypted-profile-pass".to_string())),
         )
         .expect("import bfprofile");
 
@@ -1044,11 +1052,8 @@ mod tests {
         let report = doctor_profile(&paths, &profile).expect("doctor profile");
         assert!(report.group_present);
         assert!(report.share_managed);
-        validate_profile_unlock_with_passphrase(
-            &paths,
-            &profile.id,
-            Some("encrypted-profile-pass".to_string()),
-        )
-        .expect("unlock imported bfprofile");
+        let unlock_pass = Passphrase::new("encrypted-profile-pass".to_string());
+        validate_profile_unlock_with_passphrase(&paths, &profile.id, Some(&unlock_pass))
+            .expect("unlock imported bfprofile");
     }
 }

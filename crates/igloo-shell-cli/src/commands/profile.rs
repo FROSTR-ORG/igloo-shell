@@ -15,9 +15,8 @@ pub async fn handle_profile(paths: &ShellPaths, command: ProfileCommands) -> Res
             profile_id,
             passphrase_env,
         } => {
-            let result =
-                publish_profile_backup(paths, &profile_id, load_secret_from_env(passphrase_env)?)
-                    .await?;
+            let passphrase = load_passphrase_from_env(passphrase_env)?;
+            let result = publish_profile_backup(paths, &profile_id, passphrase.as_ref()).await?;
             print_json(&result)
         }
         ProfileCommands::Remove { profile_id, yes } => {
@@ -47,16 +46,16 @@ pub async fn handle_load(paths: &ShellPaths, args: LoadArgs) -> Result<()> {
         }
         None => prompt_select_profile(paths)?,
     };
-    let passphrase = resolve_secret_source_with(
+    let passphrase = resolve_passphrase_source_with(
         args.passphrase,
         args.passphrase_file,
         std::io::stdin().is_terminal(),
         "encrypted-profile-secret",
-        "profile load requires passphrase input; use --passphrase / --passphrase-file, or run on a TTY",
+        "profile load requires passphrase input; use --passphrase / --passphrase-file, pipe it via stdin, or run on a TTY",
         prompt_load_passphrase,
     )?;
     let profile = read_profile(paths, &profile_id)?;
-    validate_profile_unlock_with_passphrase(paths, &profile_id, Some(passphrase.clone()))?;
+    validate_profile_unlock_with_passphrase(paths, &profile_id, Some(&passphrase))?;
     match mode {
         LoadMode::StatusOnly => {
             print_profile_load_summary(paths, &profile)?;

@@ -7,7 +7,9 @@ XDG_CONFIG_HOME="${WORK_DIR}/config"
 XDG_DATA_HOME="${WORK_DIR}/data"
 XDG_STATE_HOME="${WORK_DIR}/state"
 PROFILE_FILE="${WORK_DIR}/profiles.env"
-PASSPHRASE="${IGLOO_SHELL_PROFILE_PASSPHRASE:-devnet-passphrase}"
+# Bucket C C.5: passphrase is passed explicitly (--passphrase flag,
+# stdin pipe, or --passphrase-env <NAME>); no global env-var contract.
+PASSPHRASE="${IGLOO_SHELL_DEVNET_PASSPHRASE:-devnet-passphrase}"
 MESSAGE_HEX32="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 managed_shell_cmd() {
@@ -15,8 +17,17 @@ managed_shell_cmd() {
     XDG_CONFIG_HOME="${XDG_CONFIG_HOME}" \
     XDG_DATA_HOME="${XDG_DATA_HOME}" \
     XDG_STATE_HOME="${XDG_STATE_HOME}" \
-    IGLOO_SHELL_PROFILE_PASSPHRASE="${PASSPHRASE}" \
     cargo run -p igloo-shell-cli --offline -- "$@"
+}
+
+# Bucket C C.5: pipe the passphrase via stdin for subcommands that
+# unlock the profile (daemon start, daemon restart).
+managed_shell_cmd_with_passphrase() {
+  env \
+    XDG_CONFIG_HOME="${XDG_CONFIG_HOME}" \
+    XDG_DATA_HOME="${XDG_DATA_HOME}" \
+    XDG_STATE_HOME="${XDG_STATE_HOME}" \
+    cargo run -p igloo-shell-cli --offline -- "$@" <<<"${PASSPHRASE}"
 }
 
 parse_json_field() {
@@ -75,11 +86,13 @@ if [[ "${#SIGNATURE}" -ne 128 ]]; then
 fi
 
 ONBOARD_PATH="${WORK_DIR}/node-e2e.bfonboard"
+DEVNET_PASSPHRASE="${PASSPHRASE}" \
 IGLOO_SHELL_PACKAGE_PASSWORD="node-e2e-password" \
   managed_shell_cmd export "${ALICE_PROFILE_ID}" \
     --format bfonboard \
     --out "${ONBOARD_PATH}" \
     --recipient-share "${WORK_DIR}/material/share-bob.json" \
+    --passphrase-env DEVNET_PASSPHRASE \
     --package-password-env IGLOO_SHELL_PACKAGE_PASSWORD >/dev/null
 if [[ ! -s "${ONBOARD_PATH}" ]]; then
   echo "failed to export canonical bfonboard package" >&2
@@ -87,21 +100,26 @@ if [[ ! -s "${ONBOARD_PATH}" ]]; then
 fi
 
 RAW_PATH="${WORK_DIR}/node-e2e.raw.json"
-managed_shell_cmd export "${ALICE_PROFILE_ID}" \
-  --format raw \
-  --out "${RAW_PATH}" >/dev/null
+DEVNET_PASSPHRASE="${PASSPHRASE}" \
+  managed_shell_cmd export "${ALICE_PROFILE_ID}" \
+    --format raw \
+    --out "${RAW_PATH}" \
+    --passphrase-env DEVNET_PASSPHRASE >/dev/null
 if [[ ! -s "${RAW_PATH}" ]]; then
   echo "failed to export raw profile package" >&2
   exit 1
 fi
 
-managed_shell_cmd profile backup "${ALICE_PROFILE_ID}" \
-  --passphrase-env IGLOO_SHELL_PROFILE_PASSPHRASE >/dev/null
+DEVNET_PASSPHRASE="${PASSPHRASE}" \
+  managed_shell_cmd profile backup "${ALICE_PROFILE_ID}" \
+    --passphrase-env DEVNET_PASSPHRASE >/dev/null
 RECOVERY_PATH="${WORK_DIR}/node-e2e.bfshare"
+DEVNET_PASSPHRASE="${PASSPHRASE}" \
 IGLOO_SHELL_PACKAGE_PASSWORD="node-e2e-share-password" \
   managed_shell_cmd export "${ALICE_PROFILE_ID}" \
     --format bfshare \
     --out "${RECOVERY_PATH}" \
+    --passphrase-env DEVNET_PASSPHRASE \
     --package-password-env IGLOO_SHELL_PACKAGE_PASSWORD >/dev/null
 if [[ ! -s "${RECOVERY_PATH}" ]]; then
   echo "failed to export bfshare package" >&2
@@ -124,19 +142,24 @@ if [[ -z "${RECOVERED_PROFILE_ID}" ]]; then
   exit 1
 fi
 
-managed_shell_cmd profile backup "${BOB_PROFILE_ID}" \
-  --passphrase-env IGLOO_SHELL_PROFILE_PASSPHRASE >/dev/null
+DEVNET_PASSPHRASE="${PASSPHRASE}" \
+  managed_shell_cmd profile backup "${BOB_PROFILE_ID}" \
+    --passphrase-env DEVNET_PASSPHRASE >/dev/null
 ROTATESET_SOURCE_A="${WORK_DIR}/rotate-source-alice.bfshare"
 ROTATESET_SOURCE_B="${WORK_DIR}/rotate-source-bob.bfshare"
+DEVNET_PASSPHRASE="${PASSPHRASE}" \
 IGLOO_SHELL_PACKAGE_PASSWORD="rotate-source-alice-password" \
   managed_shell_cmd export "${ALICE_PROFILE_ID}" \
     --format bfshare \
     --out "${ROTATESET_SOURCE_A}" \
+    --passphrase-env DEVNET_PASSPHRASE \
     --package-password-env IGLOO_SHELL_PACKAGE_PASSWORD >/dev/null
+DEVNET_PASSPHRASE="${PASSPHRASE}" \
 IGLOO_SHELL_PACKAGE_PASSWORD="rotate-source-bob-password" \
   managed_shell_cmd export "${BOB_PROFILE_ID}" \
     --format bfshare \
     --out "${ROTATESET_SOURCE_B}" \
+    --passphrase-env DEVNET_PASSPHRASE \
     --package-password-env IGLOO_SHELL_PACKAGE_PASSWORD >/dev/null
 if [[ ! -s "${ROTATESET_SOURCE_A}" || ! -s "${ROTATESET_SOURCE_B}" ]]; then
   echo "failed to export rotate-keyset source packages" >&2
@@ -164,7 +187,6 @@ ROTATESET_JSON="$(
     XDG_CONFIG_HOME="${XDG_CONFIG_HOME}" \
     XDG_DATA_HOME="${XDG_DATA_HOME}" \
     XDG_STATE_HOME="${XDG_STATE_HOME}" \
-    IGLOO_SHELL_PROFILE_PASSPHRASE="${PASSPHRASE}" \
     cargo run -p igloo-shell-cli --offline -- rotate-keyset generate \
       --workspace "${ROTATESET_WORKSPACE}" \
       --passphrase "${PASSPHRASE}" \
@@ -213,7 +235,7 @@ if [[ -z "${ROTATESET_ONBOARDED_ID}" ]]; then
   printf '%s\n' "${ROTATESET_ONBOARDED_JSON}" >&2
   exit 1
 fi
-managed_shell_cmd daemon start --profile "${ROTATESET_ONBOARDED_ID}" >/dev/null
+managed_shell_cmd_with_passphrase daemon start --profile "${ROTATESET_ONBOARDED_ID}" >/dev/null
 managed_shell_cmd runtime status --profile "${ROTATESET_ONBOARDED_ID}" >/dev/null
 
 ROTATE_JSON="$(

@@ -22,13 +22,9 @@ fn live_policy_commands_persist_and_update_runtime() {
     harness.start_daemon(&extract_profile_id(&carol));
     harness.wait_for_runtime(&alice_id, Duration::from_secs(20));
 
-    let peers = harness.run_json_with_env(
-        &["peer", "list", "--profile", &alice_id],
-        &[(
-            "IGLOO_SHELL_PROFILE_PASSPHRASE",
-            "encrypted-profile-passphrase",
-        )],
-    );
+    // C.5: peer list talks to the running daemon over the control socket;
+    // no profile passphrase is needed.
+    let peers = harness.run_json(&["peer", "list", "--profile", &alice_id]);
     let peer = peers
         .as_array()
         .and_then(|items| items.first())
@@ -67,36 +63,26 @@ fn live_policy_commands_persist_and_update_runtime() {
     harness.restart_daemon(&alice_id);
     harness.wait_for_runtime(&alice_id, Duration::from_secs(20));
 
-    let updated = harness.run_json_with_env(
-        &[
-            "policy",
-            "set-peer-override",
-            "--profile",
-            &alice_id,
-            &peer,
-            "--direction",
-            "respond",
-            "--method",
-            "sign",
-            "--value",
-            "deny",
-        ],
-        &[(
-            "IGLOO_SHELL_PROFILE_PASSPHRASE",
-            "encrypted-profile-passphrase",
-        )],
-    );
+    // C.5: policy mutations write the manifest and call the daemon; no
+    // profile passphrase is needed.
+    let updated = harness.run_json(&[
+        "policy",
+        "set-peer-override",
+        "--profile",
+        &alice_id,
+        &peer,
+        "--direction",
+        "respond",
+        "--method",
+        "sign",
+        "--value",
+        "deny",
+    ]);
     assert_eq!(updated.get("updated"), Some(&Value::Bool(true)));
     assert_eq!(updated.get("persisted"), Some(&Value::Bool(true)));
     assert!(updated.get("result").is_some());
 
-    let cleared = harness.run_json_with_env(
-        &["policy", "clear-peer", "--profile", &alice_id, &peer],
-        &[(
-            "IGLOO_SHELL_PROFILE_PASSPHRASE",
-            "encrypted-profile-passphrase",
-        )],
-    );
+    let cleared = harness.run_json(&["policy", "clear-peer", "--profile", &alice_id, &peer]);
     assert_eq!(cleared.get("updated"), Some(&Value::Bool(true)));
     let manifest = harness.run_json(&["profile", "show", &alice_id]);
     let overrides = manifest

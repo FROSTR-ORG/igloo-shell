@@ -19,7 +19,7 @@ pub fn import_profile_from_files(
     share_path: &Path,
     label: Option<String>,
     relay_profile: Option<String>,
-    passphrase: Option<String>,
+    passphrase: Option<Passphrase>,
 ) -> Result<ProfileImportResult> {
     paths.ensure()?;
     let group_raw =
@@ -28,7 +28,8 @@ pub fn import_profile_from_files(
         fs::read_to_string(share_path).with_context(|| format!("read {}", share_path.display()))?;
     let group = parse_group_package(&group_raw).context("parse group package")?;
     let share = parse_share_package(&share_raw).context("parse share package")?;
-    let passphrase = resolve_secret(passphrase, PROFILE_PASSPHRASE_ENV, "passphrase")?;
+    // C.5: env-var fallback removed; callers must supply Passphrase explicitly.
+    let passphrase = passphrase.ok_or_else(|| anyhow!("passphrase not provided"))?;
     let now = now_unix_secs();
     let imported = profile_domain(paths).import_profile_from_files(
         &group,
@@ -36,7 +37,7 @@ pub fn import_profile_from_files(
         &share_raw,
         label,
         relay_profile,
-        &passphrase,
+        passphrase.expose_secret(),
         now,
     )?;
 
@@ -53,17 +54,15 @@ pub fn stage_onboarding_import(
     package_path: &Path,
     label: Option<String>,
     relay_profile: Option<String>,
-    passphrase: Option<String>,
+    passphrase: Option<&Passphrase>,
     onboarding_password: Option<String>,
 ) -> Result<ProfileImportResult> {
     paths.ensure()?;
     let package_raw = fs::read_to_string(package_path)
         .with_context(|| format!("read {}", package_path.display()))?;
-    let password = resolve_secret(
-        onboarding_password,
-        ONBOARDING_ENV_PASSPHRASE,
-        "onboarding package password",
-    )?;
+    // C.5: env-var fallback removed; callers thread the onboarding password.
+    let password =
+        onboarding_password.ok_or_else(|| anyhow!("onboarding package password not provided"))?;
     let decoded = decode_bfonboard_package(&package_raw, password.as_str())
         .context("decode bfonboard package")?;
     let relay_profile_id = profile_domain(paths).ensure_onboarding_relay_profile(
@@ -108,7 +107,7 @@ pub async fn import_profile_from_onboarding_package(
     package_path: &Path,
     label: Option<String>,
     relay_profile: Option<String>,
-    passphrase: Option<String>,
+    passphrase: Option<Passphrase>,
     onboarding_password: Option<String>,
 ) -> Result<ProfileImportResult> {
     paths.ensure()?;
@@ -130,7 +129,7 @@ pub async fn import_profile_from_onboarding_value(
     package_raw: &str,
     label: Option<String>,
     relay_profile: Option<String>,
-    passphrase: Option<String>,
+    passphrase: Option<Passphrase>,
     onboarding_password: Option<String>,
 ) -> Result<ProfileImportResult> {
     import_profile_from_onboarding_value_with(
@@ -169,7 +168,7 @@ pub fn finalize_connected_onboarding_import(
     connection: ConnectedOnboardingImport,
     label: Option<String>,
     relay_profile: Option<String>,
-    passphrase: Option<String>,
+    passphrase: Option<Passphrase>,
 ) -> Result<ProfileImportResult> {
     paths.ensure()?;
     let relay_profile_id = profile_domain(paths).ensure_onboarding_relay_profile(
@@ -186,8 +185,10 @@ pub fn finalize_connected_onboarding_import(
         "share_package",
         "bfonboard_import",
         &share_raw,
-        passphrase,
+        passphrase.as_ref(),
     )?;
+    // Passphrase out of scope here — zeroized on drop.
+    drop(passphrase);
 
     finalize_onboarding_import(
         paths,
@@ -203,7 +204,7 @@ pub(crate) async fn import_profile_from_onboarding_value_with<F, Fut>(
     package_raw: &str,
     label: Option<String>,
     relay_profile: Option<String>,
-    passphrase: Option<String>,
+    passphrase: Option<Passphrase>,
     onboarding_password: Option<String>,
     complete: F,
 ) -> Result<ProfileImportResult>
@@ -212,12 +213,10 @@ where
     Fut: std::future::Future<Output = Result<BootstrapImportResult>>,
 {
     paths.ensure()?;
-    let password = resolve_secret(
-        onboarding_password,
-        ONBOARDING_ENV_PASSPHRASE,
-        "onboarding package password",
-    )?;
-    let decoded = decode_bfonboard_package(&package_raw, password.as_str())
+    // C.5: env-var fallback removed; callers thread the onboarding password.
+    let password =
+        onboarding_password.ok_or_else(|| anyhow!("onboarding package password not provided"))?;
+    let decoded = decode_bfonboard_package(package_raw, password.as_str())
         .context("decode bfonboard package")?;
     let completion = match complete(decoded).await {
         Ok(completion) => completion,
@@ -298,10 +297,11 @@ pub(crate) fn import_profile_from_bfprofile_payload(
     payload: BfProfilePayload,
     label: Option<String>,
     relay_profile: Option<String>,
-    passphrase: Option<String>,
+    passphrase: Option<Passphrase>,
 ) -> Result<ProfileImportResult> {
     paths.ensure()?;
-    let passphrase = resolve_secret(passphrase, PROFILE_PASSPHRASE_ENV, "passphrase")?;
+    // C.5: env-var fallback removed; callers thread the passphrase explicitly.
+    let passphrase = passphrase.ok_or_else(|| anyhow!("passphrase not provided"))?;
     let relay_profile_id = ensure_onboarding_relay_profile(
         paths,
         relay_profile,
@@ -313,7 +313,7 @@ pub(crate) fn import_profile_from_bfprofile_payload(
         &payload,
         label,
         Some(relay_profile_id),
-        &passphrase,
+        passphrase.expose_secret(),
         now,
     )?;
     Ok(ProfileImportResult::ProfileCreated {
@@ -342,6 +342,11 @@ fn finalize_onboarding_import(
     )?;
     let profile = imported.profile;
     let encrypted_profile = imported.encrypted_profile;
+    // C.1: profile state dir holds nonce-pool and signer state. 0o700.
+    #[cfg(unix)]
+    bifrost_profile::fs_guard::ensure_dir_restricted(&paths.profile_state_dir(&profile.id), 0o700)
+        .with_context(|| format!("create {}", paths.profile_state_dir(&profile.id).display()))?;
+    #[cfg(not(unix))]
     fs::create_dir_all(paths.profile_state_dir(&profile.id))
         .with_context(|| format!("create {}", paths.profile_state_dir(&profile.id).display()))?;
     let diagnostics =
@@ -360,7 +365,9 @@ fn finalize_onboarding_import(
     Ok(ProfileImportResult::ProfileCreated {
         profile,
         encrypted_profile,
-        diagnostics: Some(serde_json::to_value(diagnostics).context("serialize onboarding diagnostics")?),
+        diagnostics: Some(
+            serde_json::to_value(diagnostics).context("serialize onboarding diagnostics")?,
+        ),
         warnings: Vec::new(),
     })
 }

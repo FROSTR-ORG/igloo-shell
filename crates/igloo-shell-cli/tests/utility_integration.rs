@@ -52,11 +52,10 @@ fn export_formats_write_expected_artifacts_and_validate_required_flags() {
             "bfprofile",
             "--out",
             support::path_arg(&harness.root().join("missing-password.bfprofile")),
+            "--passphrase-env",
+            "EXPORT_PASS",
         ],
-        &[(
-            "IGLOO_SHELL_PROFILE_PASSPHRASE",
-            "encrypted-profile-passphrase",
-        )],
+        &[("EXPORT_PASS", "encrypted-profile-passphrase")],
     );
     assert!(missing_password.stderr.contains("package password"));
 
@@ -70,13 +69,12 @@ fn export_formats_write_expected_artifacts_and_validate_required_flags() {
             support::path_arg(&harness.root().join("missing-recipient.bfonboard")),
             "--package-password-env",
             "IGLOO_SHELL_PACKAGE_PASSWORD",
+            "--passphrase-env",
+            "EXPORT_PASS",
         ],
         &[
             ("IGLOO_SHELL_PACKAGE_PASSWORD", "onboard-pass"),
-            (
-                "IGLOO_SHELL_PROFILE_PASSPHRASE",
-                "encrypted-profile-passphrase",
-            ),
+            ("EXPORT_PASS", "encrypted-profile-passphrase"),
         ],
     );
     assert!(
@@ -93,11 +91,10 @@ fn export_formats_write_expected_artifacts_and_validate_required_flags() {
             "bogus",
             "--out",
             support::path_arg(&harness.root().join("bogus.out")),
+            "--passphrase-env",
+            "EXPORT_PASS",
         ],
-        &[(
-            "IGLOO_SHELL_PROFILE_PASSPHRASE",
-            "encrypted-profile-passphrase",
-        )],
+        &[("EXPORT_PASS", "encrypted-profile-passphrase")],
     );
     assert!(
         invalid_format
@@ -208,13 +205,10 @@ fn daemon_and_runtime_commands_cover_status_logs_restart_and_wipe_state() {
     );
     assert!(ops.get("runtime_metadata").is_some());
 
-    let missing_yes = harness.run_expect_failure(
-        &["runtime", "wipe-state", "--profile", &alice_id],
-        &[(
-            "IGLOO_SHELL_PROFILE_PASSPHRASE",
-            "encrypted-profile-passphrase",
-        )],
-    );
+    // C.5: wipe-state and runtime status talk to the running daemon over
+    // the control socket; no profile passphrase needed.
+    let missing_yes =
+        harness.run_expect_failure(&["runtime", "wipe-state", "--profile", &alice_id], &[]);
     assert!(
         missing_yes
             .stderr
@@ -225,13 +219,7 @@ fn daemon_and_runtime_commands_cover_status_logs_restart_and_wipe_state() {
     assert!(wiped.is_object());
 
     harness.stop_daemon(&alice_id);
-    let stopped = harness.run_expect_failure(
-        &["runtime", "status", "--profile", &alice_id],
-        &[(
-            "IGLOO_SHELL_PROFILE_PASSPHRASE",
-            "encrypted-profile-passphrase",
-        )],
-    );
+    let stopped = harness.run_expect_failure(&["runtime", "status", "--profile", &alice_id], &[]);
     assert!(stopped.stderr.contains("daemon"));
 
     harness.restart_daemon(&alice_id);
@@ -258,13 +246,9 @@ fn check_commands_fail_cleanly_after_daemon_stop() {
     harness.stop_daemon(&alice_id);
 
     for kind in ["onboard", "sign", "ecdh"] {
-        let failure = harness.run_json_with_env(
-            &["check", kind, "--profile", &alice_id],
-            &[(
-                "IGLOO_SHELL_PROFILE_PASSPHRASE",
-                "encrypted-profile-passphrase",
-            )],
-        );
+        // check talks to the running daemon over the control socket; no
+        // passphrase needed.
+        let failure = harness.run_json(&["check", kind, "--profile", &alice_id]);
         assert!(
             failure.get("ready").and_then(Value::as_bool) == Some(false),
             "expected check {kind} to report not-ready after daemon stop: {failure:?}"

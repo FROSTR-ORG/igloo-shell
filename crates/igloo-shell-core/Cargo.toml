@@ -23,6 +23,11 @@ bifrost-codec = { path = "../../../bifrost-rs/crates/bifrost-codec" }
 bifrost-core = { path = "../../../bifrost-rs/crates/bifrost-core" }
 bifrost-signer = { path = "../../../bifrost-rs/crates/bifrost-signer" }
 frostr-utils = { path = "../../../bifrost-rs/crates/frostr-utils" }
+rand_core = "0.6"
+thiserror = "2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 bincode = "1"

@@ -324,13 +324,8 @@ fn profile_load_without_runtime_start_prints_next_commands() {
             .contains(&format!("igloo-shell daemon status --profile {alice_id}"))
     );
 
-    let status = harness.run_expect_failure(
-        &["daemon", "status", "--profile", &alice_id],
-        &[(
-            "IGLOO_SHELL_PROFILE_PASSPHRASE",
-            "encrypted-profile-passphrase",
-        )],
-    );
+    // C.5: daemon status reads daemon.json only; no passphrase needed.
+    let status = harness.run_expect_failure(&["daemon", "status", "--profile", &alice_id], &[]);
     assert!(status.stderr.contains("daemon metadata is not present"));
 }
 
@@ -406,6 +401,10 @@ fn import_with_start_attaches_to_daemon_log() {
     harness.keygen(2, 3);
     harness.set_relay_profile("local");
 
+    // C.6: with Bucket B's Argon2id defaults (m=256MB / t=4) running once
+    // in the parent and once in the spawned daemon, the import + start
+    // sequence routinely takes >10s on contended hosts. Give the
+    // attached-mode runner enough wall clock to reach a bound socket.
     let _result = harness.run_for_a_bit_with_env(
         &[
             "import",
@@ -422,7 +421,7 @@ fn import_with_start_attaches_to_daemon_log() {
             "--start",
         ],
         &[],
-        Duration::from_secs(10),
+        Duration::from_secs(30),
     );
 
     let profiles = harness.list_profiles();
@@ -439,7 +438,7 @@ fn import_with_start_attaches_to_daemon_log() {
         .and_then(Value::as_str)
         .expect("imported profile id")
         .to_string();
-    harness.wait_for_runtime(&profile_id, Duration::from_secs(20));
+    harness.wait_for_runtime(&profile_id, Duration::from_secs(30));
 }
 
 #[test]
@@ -457,12 +456,9 @@ fn recover_non_json_prints_next_commands_and_exits() {
             "backup",
             &alice_id,
             "--passphrase-env",
-            "IGLOO_SHELL_PROFILE_PASSPHRASE",
+            "BACKUP_PASS",
         ],
-        &[(
-            "IGLOO_SHELL_PROFILE_PASSPHRASE",
-            "encrypted-profile-passphrase",
-        )],
+        &[("BACKUP_PASS", "encrypted-profile-passphrase")],
     );
     let share = harness.export_bfshare_package(&alice_id, "recover-pass");
     let share_path = harness.save_onboarding_package("alice.bfshare", &share);
@@ -498,12 +494,9 @@ fn recover_with_start_attaches_to_daemon_log() {
             "backup",
             &alice_id,
             "--passphrase-env",
-            "IGLOO_SHELL_PROFILE_PASSPHRASE",
+            "BACKUP_PASS",
         ],
-        &[(
-            "IGLOO_SHELL_PROFILE_PASSPHRASE",
-            "encrypted-profile-passphrase",
-        )],
+        &[("BACKUP_PASS", "encrypted-profile-passphrase")],
     );
     let share = harness.export_bfshare_package(&alice_id, "recover-pass");
     let share_path = harness.save_onboarding_package("alice-start.bfshare", &share);
@@ -520,8 +513,10 @@ fn recover_with_start_attaches_to_daemon_log() {
             "encrypted-profile-passphrase",
             "--start",
         ],
+        // C.6: Argon2id runs twice (parent + spawned daemon) — give the
+        // attached-mode runner enough wall clock to reach a bound socket.
         &[],
-        Duration::from_secs(10),
+        Duration::from_secs(30),
     );
 
     let profiles = harness.list_profiles();
@@ -667,14 +662,21 @@ fn rotate_key_with_start_attaches_to_daemon_log() {
             "encrypted-profile-passphrase",
             "--start",
         ],
+        // C.6: the rotate-key --start flow Argon2-derives once to read
+        // alice's current profile, once to write the rotated profile,
+        // and once more inside the spawned daemon's signer-state init.
+        // 60s of wall clock keeps the test honest without flaking on
+        // contended hosts.
         &[],
-        Duration::from_secs(10),
+        Duration::from_secs(60),
     );
 
     let new_profile_id =
-        harness.wait_for_replaced_profile_id(&alice_label, &alice_id, Duration::from_secs(20));
+        harness.wait_for_replaced_profile_id(&alice_label, &alice_id, Duration::from_secs(60));
     assert_ne!(new_profile_id, alice_id);
-    harness.wait_for_runtime(&new_profile_id, Duration::from_secs(20));
+    // C.6: the rotated profile's daemon must run Argon2id again during
+    // signer-state init; bump the readiness timeout accordingly.
+    harness.wait_for_runtime(&new_profile_id, Duration::from_secs(60));
 }
 
 #[test]
@@ -751,8 +753,10 @@ fn onboard_with_start_attaches_to_daemon_log() {
             "encrypted-profile-passphrase",
             "--start",
         ],
+        // C.6: Argon2id runs twice (parent + spawned daemon) — give the
+        // attached-mode runner enough wall clock to reach a bound socket.
         &[],
-        Duration::from_secs(10),
+        Duration::from_secs(30),
     );
 
     let profile_id = harness.wait_for_profile_id_by_label("bob-start", Duration::from_secs(20));
@@ -1072,13 +1076,9 @@ fn managed_runtime_e2e_covers_ping_onboard_sign_and_ecdh() {
     harness.wait_for_runtime(&bob_id, Duration::from_secs(20));
     harness.wait_for_runtime(&carol_id, Duration::from_secs(20));
 
-    let peers = harness.run_json_with_env(
-        &["peer", "list", "--profile", &alice_id],
-        &[(
-            "IGLOO_SHELL_PROFILE_PASSPHRASE",
-            "encrypted-profile-passphrase",
-        )],
-    );
+    // C.5: peer / runtime subcommands talk to the running daemon over
+    // the control socket — no profile passphrase needed.
+    let peers = harness.run_json(&["peer", "list", "--profile", &alice_id]);
     let peer_pubkeys = peers
         .as_array()
         .expect("peer list array")
@@ -1089,36 +1089,18 @@ fn managed_runtime_e2e_covers_ping_onboard_sign_and_ecdh() {
     assert_eq!(peer_pubkeys.len(), 2);
 
     for peer in &peer_pubkeys {
-        harness.run_json_with_env(
-            &["peer", "ping", "--profile", &alice_id, peer],
-            &[(
-                "IGLOO_SHELL_PROFILE_PASSPHRASE",
-                "encrypted-profile-passphrase",
-            )],
-        );
-        harness.run_json_with_env(
-            &["peer", "onboard", "--profile", &alice_id, peer],
-            &[(
-                "IGLOO_SHELL_PROFILE_PASSPHRASE",
-                "encrypted-profile-passphrase",
-            )],
-        );
+        harness.run_json(&["peer", "ping", "--profile", &alice_id, peer]);
+        harness.run_json(&["peer", "onboard", "--profile", &alice_id, peer]);
     }
     harness.wait_for_sign_ready(&alice_id, Duration::from_secs(20));
 
-    let sign = harness.run_json_with_env(
-        &[
-            "runtime",
-            "sign",
-            "--profile",
-            &alice_id,
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        ],
-        &[(
-            "IGLOO_SHELL_PROFILE_PASSPHRASE",
-            "encrypted-profile-passphrase",
-        )],
-    );
+    let sign = harness.run_json(&[
+        "runtime",
+        "sign",
+        "--profile",
+        &alice_id,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ]);
     let signature = sign
         .get("signatures_hex")
         .and_then(Value::as_array)
@@ -1127,13 +1109,7 @@ fn managed_runtime_e2e_covers_ping_onboard_sign_and_ecdh() {
         .expect("signature hex");
     assert_eq!(signature.len(), 128);
 
-    let ecdh = harness.run_json_with_env(
-        &["runtime", "ecdh", "--profile", &alice_id, &peer_pubkeys[0]],
-        &[(
-            "IGLOO_SHELL_PROFILE_PASSPHRASE",
-            "encrypted-profile-passphrase",
-        )],
-    );
+    let ecdh = harness.run_json(&["runtime", "ecdh", "--profile", &alice_id, &peer_pubkeys[0]]);
     let secret = ecdh
         .get("shared_secret_hex32")
         .and_then(Value::as_str)
