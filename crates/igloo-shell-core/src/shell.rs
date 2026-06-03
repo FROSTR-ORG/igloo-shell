@@ -874,13 +874,8 @@ mod tests {
         )
         .expect("write relay profile");
 
-        let bundle = create_keyset(CreateKeysetConfig {
-            group_name: "Test Group".to_string(),
-            threshold: 2,
-            count: 3,
-            signing_key32: None,
-        })
-        .expect("create keyset");
+        let bundle = create_keyset(CreateKeysetConfig::new("Test Group", 2, 3))
+            .expect("create keyset");
         let group = bundle.group.clone();
         let share = bundle
             .shares
@@ -999,13 +994,8 @@ mod tests {
         )
         .expect("write relay profile");
 
-        let bundle = create_keyset(CreateKeysetConfig {
-            group_name: "Test Group".to_string(),
-            threshold: 2,
-            count: 3,
-            signing_key32: None,
-        })
-        .expect("create keyset");
+        let bundle = create_keyset(CreateKeysetConfig::new("Test Group", 2, 3))
+            .expect("create keyset");
         let group_path = paths.data_dir.join("group.json");
         let share_path = paths.data_dir.join("share.json");
         write_json(&group_path, &GroupPackageWire::from(bundle.group.clone()))

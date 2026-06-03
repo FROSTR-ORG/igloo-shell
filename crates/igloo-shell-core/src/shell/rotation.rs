@@ -131,12 +131,11 @@ pub fn create_rotation_workspace(
     paths.ensure()?;
     let source_profile = read_profile(paths, source_profile_id)?;
     let source_payload = profile_to_package_payload(paths, source_profile_id, passphrase)?;
-    create_keyset(CreateKeysetConfig {
-        group_name: source_payload.group_package.group_name.clone(),
+    create_keyset(CreateKeysetConfig::new(
+        source_payload.group_package.group_name.clone(),
         threshold,
         count,
-        signing_key32: None,
-    })
+    ))
     .map_err(|error| anyhow!("validate rotation geometry: {error}"))?;
     let source_group = group_from_payload(&source_payload)?;
     let source_share = share_from_payload(&source_group, &source_payload)?;
@@ -536,12 +535,7 @@ pub fn create_generated_keyset_draft(
     threshold: u16,
     count: u16,
 ) -> Result<GeneratedKeysetDraft> {
-    let bundle = create_keyset(CreateKeysetConfig {
-        group_name: group_name.clone(),
-        threshold,
-        count,
-        signing_key32: None,
-    })
+    let bundle = create_keyset(CreateKeysetConfig::new(group_name.clone(), threshold, count))
     .map_err(|error| anyhow!("create keyset: {error}"))?;
     let shares = bundle
         .shares
