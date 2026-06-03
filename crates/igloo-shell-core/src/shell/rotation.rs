@@ -135,6 +135,7 @@ pub fn create_rotation_workspace(
         group_name: source_payload.group_package.group_name.clone(),
         threshold,
         count,
+        signing_key32: None,
     })
     .map_err(|error| anyhow!("validate rotation geometry: {error}"))?;
     let source_group = group_from_payload(&source_payload)?;
@@ -539,6 +540,7 @@ pub fn create_generated_keyset_draft(
         group_name: group_name.clone(),
         threshold,
         count,
+        signing_key32: None,
     })
     .map_err(|error| anyhow!("create keyset: {error}"))?;
     let shares = bundle

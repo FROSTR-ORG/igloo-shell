@@ -878,6 +878,7 @@ mod tests {
             group_name: "Test Group".to_string(),
             threshold: 2,
             count: 3,
+            signing_key32: None,
         })
         .expect("create keyset");
         let group = bundle.group.clone();
@@ -1002,6 +1003,7 @@ mod tests {
             group_name: "Test Group".to_string(),
             threshold: 2,
             count: 3,
+            signing_key32: None,
         })
         .expect("create keyset");
         let group_path = paths.data_dir.join("group.json");
