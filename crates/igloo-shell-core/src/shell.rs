@@ -16,18 +16,14 @@ use bifrost_core::secret::Passphrase;
 use bifrost_core::types::{PeerPolicy, PeerPolicyOverride};
 use frostr_utils::{
     BfManualPeerPolicyOverride, BfOnboardPayload, BfProfileDevice, BfProfilePayload,
-    CreateKeysetConfig, RotateKeysetRequest, build_profile_backup_event,
-    core_peer_policy_override_to_bf, create_encrypted_profile_backup, create_keyset,
-    decode_bfonboard_package, encode_bfonboard_package, rotate_keyset_dealer,
+    CreateKeysetConfig, RecoverKeyInput, RotateKeysetRequest, core_peer_policy_override_to_bf,
+    create_keyset, decode_bfonboard_package, decode_bfshare_package, encode_bfonboard_package,
+    recover_key, rotate_keyset_dealer,
 };
-use futures_util::{SinkExt, StreamExt};
-use nostr::Event;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::Digest;
-use tokio::time::{Duration as TokioDuration, timeout};
 use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::Message;
 
 use bifrost_app::native_runtime::DaemonMetadata;
 #[cfg(test)]
@@ -91,11 +87,12 @@ pub use onboarding::{
     import_profile_from_onboarding_package, import_profile_from_onboarding_value, run_setup,
     stage_onboarding_import,
 };
+pub use packages::{RecoveredGroupKey, recover_group_secret_from_profile_and_shares};
 pub(crate) use packages::{
     build_policy_overrides_value, find_member_index_for_share_secret, group_from_payload,
     hex_to_bytes32, preview_from_bootstrap_completion, profile_to_package_payload,
-    publish_profile_payload_backup, rotation_payload_from_share, rotation_workspace_manifest_path,
-    share_from_payload, write_package_output,
+    rotation_payload_from_share, rotation_workspace_manifest_path, share_from_payload,
+    write_package_output,
 };
 use paths::ShellPaths;
 pub use profiles::{
@@ -105,8 +102,8 @@ pub use profiles::{
     write_profile,
 };
 pub(crate) use profiles::{effective_policy_override, touch_last_used_profile};
+pub(crate) use relay::probe_relays;
 pub use relay::{add_relays, remove_relays, replace_relay_profile, set_default_relay_profile};
-pub(crate) use relay::{probe_relays, publish_nostr_event};
 pub use rotation::{
     apply_rotation_update_from_bfonboard_value, create_generated_keyset_draft,
     create_rotation_workspace, default_rotation_workspace_path,
@@ -883,8 +880,8 @@ mod tests {
         )
         .expect("write relay profile");
 
-        let bundle = create_keyset(CreateKeysetConfig::new("Test Group", 2, 3))
-            .expect("create keyset");
+        let bundle =
+            create_keyset(CreateKeysetConfig::new("Test Group", 2, 3)).expect("create keyset");
         let group = bundle.group.clone();
         let share = bundle
             .shares
@@ -1001,8 +998,8 @@ mod tests {
         )
         .expect("write relay profile");
 
-        let bundle = create_keyset(CreateKeysetConfig::new("Test Group", 2, 3))
-            .expect("create keyset");
+        let bundle =
+            create_keyset(CreateKeysetConfig::new("Test Group", 2, 3)).expect("create keyset");
         let group_path = paths.data_dir.join("group.json");
         let share_path = paths.data_dir.join("share.json");
         write_json(&group_path, &GroupPackageWire::from(bundle.group.clone()))

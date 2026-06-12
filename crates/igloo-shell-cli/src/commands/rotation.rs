@@ -27,10 +27,6 @@ pub async fn handle_rotate_key(paths: &ShellPaths, args: RotateKeyArgs) -> Resul
     let profile = result_profile(&import)?;
     let new_profile_id = profile.id.clone();
 
-    if let Err(err) = publish_profile_backup(paths, &new_profile_id, None).await {
-        eprintln!("warning: failed to publish encrypted profile backup: {err}");
-    }
-
     let daemon = if args.daemon {
         // passphrase cloned: ensure_profile_daemon owns the stdin handoff;
         // we keep our `passphrase` for the optional follow-on `--start`.
@@ -301,9 +297,6 @@ pub async fn handle_keygen(paths: &ShellPaths, args: KeygenArgs) -> Result<()> {
         Some(passphrase.clone_secret()),
     )?;
     let profile = result_profile(&import)?.clone();
-    if let Err(err) = publish_profile_backup(paths, &profile.id, None).await {
-        eprintln!("warning: failed to publish encrypted profile backup: {err}");
-    }
     let export_root = paths
         .state_dir
         .join("generated-onboarding")

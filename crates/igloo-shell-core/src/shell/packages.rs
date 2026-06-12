@@ -1,4 +1,5 @@
 use super::*;
+use nostr::ToBech32;
 
 pub(crate) fn profile_to_package_payload(
     paths: &ShellPaths,
@@ -51,11 +52,78 @@ pub(crate) fn rotation_payload_from_share(
     bifrost_profile::rotation_payload_from_share(group, share, label, relays)
 }
 
-pub(crate) async fn publish_profile_payload_backup(payload: &BfProfilePayload) -> Result<()> {
-    let backup = create_encrypted_profile_backup(payload).context("build encrypted backup")?;
-    let event = build_profile_backup_event(&payload.device.share_secret, &backup, None)
-        .context("build backup event")?;
-    publish_nostr_event(&payload.device.relays, &event).await
+/// Recovered group secret-key material. The signing key is reconstructed from a
+/// threshold of shares and never persisted by this crate; the caller decides
+/// how to surface it (the shell CLI writes the `nsec` to a `0o600` file).
+#[derive(Debug, Clone)]
+pub struct RecoveredGroupKey {
+    pub nsec: String,
+    pub signing_key_hex: String,
+    pub group_public_key: String,
+}
+
+/// Reconstruct the group secret key (nsec) from a threshold of shares, fully
+/// local — no relay. The recovering device's own `profile_id` supplies both the
+/// group package (member indices) and its own share (unlocked with `passphrase`);
+/// the operator pastes the remaining `threshold - 1` members' `bfshare` packages
+/// as `(package_text, package_secret)` pairs. Each pasted share secret is mapped
+/// to its member index via the local group package and **fails loudly** if it is
+/// not a member of this group (mirrors the browser `shareWireFromSecret`).
+pub fn recover_group_secret_from_profile_and_shares(
+    paths: &ShellPaths,
+    profile_id: &str,
+    passphrase: Option<&Passphrase>,
+    pasted: &[(String, String)],
+) -> Result<RecoveredGroupKey> {
+    let payload = profile_to_package_payload(paths, profile_id, passphrase)?;
+    let group = group_from_payload(&payload)?;
+
+    // The local device contributes its own share first.
+    let device_share = share_from_payload(&group, &payload)?;
+    let mut seen_idx = HashSet::new();
+    seen_idx.insert(device_share.idx);
+    let mut shares = vec![device_share];
+
+    for (package_text, package_secret) in pasted {
+        let decoded = decode_bfshare_package(package_text, package_secret)
+            .map_err(|error| anyhow!("decode pasted bfshare package: {error}"))?;
+        let idx = find_member_index_for_share_secret(&group, &decoded.share_secret)
+            .context("pasted bfshare does not belong to this profile's group")?;
+        if !seen_idx.insert(idx) {
+            bail!(
+                "member {idx} was supplied more than once (the local profile already \
+                 contributes its own share; paste only the other members' bfshares)"
+            );
+        }
+        shares.push(bifrost_core::types::SharePackage {
+            idx,
+            seckey: bifrost_core::secret::SharePrivateKey::new(hex_to_bytes32(
+                &decoded.share_secret,
+            )?),
+        });
+    }
+
+    if shares.len() < group.threshold as usize {
+        bail!(
+            "insufficient shares to recover the group key: need {} (have {})",
+            group.threshold,
+            shares.len()
+        );
+    }
+
+    let recovered = recover_key(&RecoverKeyInput {
+        group: group.clone(),
+        shares,
+    })
+    .map_err(|error| anyhow!("recover group secret key: {error}"))?;
+    let signing_key32 = recovered.signing_key32.expose_bytes();
+    let secret_key =
+        nostr::SecretKey::from_slice(signing_key32).context("parse recovered group secret key")?;
+    Ok(RecoveredGroupKey {
+        nsec: secret_key.to_bech32().context("encode recovered nsec")?,
+        signing_key_hex: hex::encode(signing_key32),
+        group_public_key: hex::encode(group.group_pk),
+    })
 }
 
 pub(crate) fn preview_from_bootstrap_completion(

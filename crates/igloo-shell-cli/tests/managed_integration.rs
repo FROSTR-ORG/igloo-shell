@@ -125,8 +125,6 @@ fn rotate_keyset_init_and_generate_replace_local_profile_and_emit_bfonboard_pack
     let alice_label = extract_profile_label(&alice);
     let bob = harness.import_profile("share-bob.json", "bob", "local");
     let bob_id = extract_profile_id(&bob);
-    harness.backup_profile(&alice_id);
-    harness.backup_profile(&bob_id);
 
     let alice_bfshare = harness.export_bfshare_package(&alice_id, "alice-rotate-pass");
     let bob_bfshare = harness.export_bfshare_package(&bob_id, "bob-rotate-pass");
@@ -442,98 +440,48 @@ fn import_with_start_attaches_to_daemon_log() {
 }
 
 #[test]
-fn recover_non_json_prints_next_commands_and_exits() {
-    let mut harness = TestHarness::new("recover-non-json");
+fn recover_key_reconstructs_group_nsec_to_file() {
+    let mut harness = TestHarness::new("recover-key");
     harness.start_relay();
     harness.keygen(2, 3);
     harness.set_relay_profile("local");
 
+    // The recovering device (alice) contributes its own share; bob's bfshare is
+    // the second share toward the 2-of-3 threshold. Reconstruction is fully
+    // local — the group package comes from alice's own profile, no relay backup.
     let alice = harness.import_profile("share-alice.json", "alice", "local");
     let alice_id = extract_profile_id(&alice);
-    harness.run_with_env(
-        &[
-            "profile",
-            "backup",
-            &alice_id,
-            "--passphrase-env",
-            "BACKUP_PASS",
-        ],
-        &[("BACKUP_PASS", "encrypted-profile-passphrase")],
-    );
-    let share = harness.export_bfshare_package(&alice_id, "recover-pass");
-    let share_path = harness.save_onboarding_package("alice.bfshare", &share);
+    let bob = harness.import_profile("share-bob.json", "bob", "local");
+    let bob_id = extract_profile_id(&bob);
+
+    let bob_bfshare = harness.export_bfshare_package(&bob_id, "bob-recover-pass");
+    let bob_bfshare_path = harness.save_onboarding_package("bob-recover.bfshare", &bob_bfshare);
+    let out_path = harness.root().join("recovered.nsec");
 
     let result = harness.run(&[
-        "recover",
-        support::path_arg(&share_path),
-        "--label",
-        "alice-recovered",
-        "--package-secret",
-        "recover-pass",
+        "recover-key",
+        "--profile",
+        &alice_id,
+        "--bfshare",
+        support::path_arg(&bob_bfshare_path),
+        "--bfshare-secret",
+        "bob-recover-pass",
         "--passphrase",
         "encrypted-profile-passphrase",
+        "--out",
+        support::path_arg(&out_path),
     ]);
 
-    assert!(result.stdout.contains("Recovery complete."));
-    assert!(result.stdout.contains("Next commands:"));
-    assert!(result.stdout.contains("igloo-shell profile load"));
-}
-
-#[test]
-fn recover_with_start_attaches_to_daemon_log() {
-    let mut harness = TestHarness::new("recover-start");
-    harness.start_relay();
-    harness.keygen(2, 3);
-    harness.set_relay_profile("local");
-
-    let alice = harness.import_profile("share-alice.json", "alice", "local");
-    let alice_id = extract_profile_id(&alice);
-    harness.run_with_env(
-        &[
-            "profile",
-            "backup",
-            &alice_id,
-            "--passphrase-env",
-            "BACKUP_PASS",
-        ],
-        &[("BACKUP_PASS", "encrypted-profile-passphrase")],
+    assert!(
+        result.stdout.contains("Group public key:"),
+        "stdout: {}",
+        result.stdout
     );
-    let share = harness.export_bfshare_package(&alice_id, "recover-pass");
-    let share_path = harness.save_onboarding_package("alice-start.bfshare", &share);
-
-    let _result = harness.run_for_a_bit_with_env(
-        &[
-            "recover",
-            support::path_arg(&share_path),
-            "--label",
-            "alice-recover-start",
-            "--package-secret",
-            "recover-pass",
-            "--passphrase",
-            "encrypted-profile-passphrase",
-            "--start",
-        ],
-        // C.6: Argon2id runs twice (parent + spawned daemon) — give the
-        // attached-mode runner enough wall clock to reach a bound socket.
-        &[],
-        Duration::from_secs(30),
+    let nsec = std::fs::read_to_string(&out_path).expect("read recovered nsec");
+    assert!(
+        nsec.starts_with("nsec1"),
+        "expected a bech32 nsec, got: {nsec}"
     );
-
-    let profiles = harness.list_profiles();
-    let profile_id = profiles
-        .as_array()
-        .and_then(|items| {
-            items.iter().find(|item| {
-                item.get("label")
-                    .and_then(Value::as_str)
-                    .is_some_and(|label| label == "alice-recover-start")
-            })
-        })
-        .and_then(|item| item.get("id"))
-        .and_then(Value::as_str)
-        .expect("recovered profile id")
-        .to_string();
-    harness.wait_for_runtime(&profile_id, Duration::from_secs(20));
 }
 
 #[test]

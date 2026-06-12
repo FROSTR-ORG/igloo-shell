@@ -53,9 +53,6 @@ pub async fn handle_import(paths: &ShellPaths, args: ImportArgs) -> Result<()> {
         _ => bail!("import requires either <bfprofile-or-path> or both --group and --share"),
     };
     if let Ok(profile) = result_profile(&import) {
-        if let Err(err) = publish_profile_backup(paths, &profile.id, None).await {
-            eprintln!("warning: failed to publish encrypted profile backup: {err}");
-        }
         let daemon = if args.daemon {
             // passphrase cloned: ensure_profile_daemon takes ownership to
             // pipe the passphrase to the spawned daemon; we keep a copy
@@ -143,72 +140,77 @@ pub fn handle_export(paths: &ShellPaths, args: ExportArgs) -> Result<()> {
     print_json(&result)
 }
 
-pub async fn handle_recover(paths: &ShellPaths, args: RecoverArgs) -> Result<()> {
-    let package_raw = read_package_or_inline(&args.bfshare_or_path)?;
-    let package_secret = resolve_package_secret(
-        args.package_secret,
-        args.package_secret_file,
-        "recover requires package secret input; use --package-secret / --package-secret-file, or run on a TTY",
-    )?;
+pub fn handle_recover_key(paths: &ShellPaths, args: RecoverKeyArgs) -> Result<()> {
+    if args.bfshares.len() != args.bfshare_secrets.len() {
+        bail!(
+            "each --bfshare needs a matching --bfshare-secret (got {} shares, {} secrets)",
+            args.bfshares.len(),
+            args.bfshare_secrets.len()
+        );
+    }
+    // Validate the local profile exists up front for a clear error.
+    let _ = read_profile(paths, &args.profile)?;
     let passphrase = resolve_passphrase_source_with(
         args.passphrase,
         args.passphrase_file,
         std::io::stdin().is_terminal(),
         "encrypted-profile-secret",
-        "recover requires passphrase input; use --passphrase / --passphrase-file, pipe it via stdin, or run on a TTY",
-        prompt_passphrase,
+        "recover-key requires the local profile passphrase; use --passphrase / --passphrase-file, pipe it via stdin, or run on a TTY",
+        prompt_load_passphrase,
     )?;
-    let label = resolve_profile_label(args.label)?;
-    let import = recover_profile_from_bfshare_value(
-        paths,
-        &package_raw,
-        package_secret,
-        Some(label),
-        None,
-        // passphrase cloned: bifrost-profile consumes the Passphrase; we
-        // keep a copy to spawn the daemon below.
-        Some(passphrase.clone_secret()),
-    )
-    .await?;
-    if let Ok(profile) = result_profile(&import) {
-        if let Err(err) = publish_profile_backup(paths, &profile.id, None).await {
-            eprintln!("warning: failed to publish encrypted profile backup: {err}");
-        }
-        let daemon = if args.daemon {
-            // passphrase cloned: daemon spawn consumes its copy via stdin.
-            let (metadata, existing) =
-                ensure_profile_daemon(paths, &profile.id, Some(passphrase.clone_secret())).await?;
-            Some((metadata, existing))
-        } else {
-            None
-        };
-        if args.json {
-            return print_json(&serde_json::json!({
-                "import": import,
-                "daemon": daemon.as_ref().map(|(metadata, existing)| serde_json::json!({
-                    "started": !existing,
-                    "metadata": metadata,
-                })),
-                "next": {
-                    "load": format!("igloo-shell profile load {}", profile.id),
-                    "start": format!("igloo-shell profile load {} --start", profile.id),
-                    "daemon": format!("igloo-shell profile load {} --daemon", profile.id),
-                }
-            }));
-        }
-        if args.start {
-            return start_profile_attached(paths, profile, passphrase).await;
-        }
-        if let Some((metadata, existing)) = daemon {
-            print_profile_ready_summary("Recovery complete.", profile);
-            print_daemon_started_summary(profile, &metadata, existing);
-            return Ok(());
-        }
-        print_profile_ready_summary("Recovery complete.", profile);
-        print_profile_next_commands(&profile.id);
-        return Ok(());
+    let mut pasted = Vec::with_capacity(args.bfshares.len());
+    for (share_arg, secret) in args.bfshares.iter().zip(args.bfshare_secrets.iter()) {
+        let package_raw = read_package_or_inline(share_arg)?;
+        pasted.push((package_raw, secret.clone()));
     }
-    print_json(&import)
+
+    let recovered = recover_group_secret_from_profile_and_shares(
+        paths,
+        &args.profile,
+        Some(&passphrase),
+        &pasted,
+    )?;
+
+    let out_path = std::path::Path::new(&args.out);
+    if let Some(parent) = out_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        #[cfg(unix)]
+        bifrost_profile::fs_guard::ensure_dir_restricted(parent, 0o700)
+            .with_context(|| format!("create {}", parent.display()))?;
+        #[cfg(not(unix))]
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    // The recovered group nsec is the most sensitive artifact the shell emits;
+    // write it atomically at 0o600 and print only the path, never the key.
+    #[cfg(unix)]
+    bifrost_profile::fs_guard::write_restricted_bytes_atomic(
+        out_path,
+        recovered.nsec.as_bytes(),
+        0o600,
+    )
+    .with_context(|| format!("write {}", out_path.display()))?;
+    #[cfg(not(unix))]
+    fs::write(out_path, recovered.nsec.as_bytes())
+        .with_context(|| format!("write {}", out_path.display()))?;
+
+    if args.json {
+        return print_json(&serde_json::json!({
+            "recovered": {
+                "group_public_key": recovered.group_public_key,
+                "out": args.out,
+            }
+        }));
+    }
+    // The local profile contributes its own share, plus every pasted bfshare.
+    println!(
+        "Recovered the group secret key from {} share(s).",
+        pasted.len() + 1
+    );
+    println!("Wrote nsec to {} (0o600).", out_path.display());
+    println!("Group public key: {}", recovered.group_public_key);
+    Ok(())
 }
 
 pub async fn handle_setup(paths: &ShellPaths, args: SetupArgs) -> Result<()> {

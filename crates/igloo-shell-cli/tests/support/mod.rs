@@ -683,22 +683,6 @@ impl TestHarness {
         self.run_json(&["profile", "show", profile_id])
     }
 
-    pub fn backup_profile(&self, profile_id: &str) -> Value {
-        // `profile backup --passphrase-env <NAME>` still works — the env
-        // var is named explicitly per-invocation, not the retired global
-        // global passphrase contract.
-        self.run_json_with_env(
-            &[
-                "profile",
-                "backup",
-                profile_id,
-                "--passphrase-env",
-                "BACKUP_PASSPHRASE",
-            ],
-            &[("BACKUP_PASSPHRASE", Self::TEST_PASSPHRASE)],
-        )
-    }
-
     pub fn doctor_profile(&self, profile_id: &str) -> Value {
         self.run_json(&["profile", "doctor", profile_id])
     }

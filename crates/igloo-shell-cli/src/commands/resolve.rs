@@ -327,7 +327,7 @@ pub fn load_mode(args: &LoadArgs) -> LoadMode {
 ///
 /// Bucket C C.5: the legacy global passphrase env contract is gone, but
 /// a few specific subcommands still accept a user-named env var (e.g.
-/// `profile backup --passphrase-env MY_VAR`) so the operator can choose a
+/// `export --passphrase-env MY_VAR`) so the operator can choose a
 /// one-off variable name. Returns `Ok(None)` when no env indirection was
 /// requested.
 pub fn load_secret_from_env(env_name: Option<String>) -> Result<Option<String>> {

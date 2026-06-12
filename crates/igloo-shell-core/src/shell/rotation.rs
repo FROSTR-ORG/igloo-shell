@@ -1,5 +1,4 @@
 use super::*;
-use bifrost_profile::{preview_bfshare_recovery, publish_profile_backup};
 
 pub fn finalize_rotation_update_import(
     paths: &ShellPaths,
@@ -392,40 +391,52 @@ pub async fn generate_rotation_workspace(
         );
     }
 
-    let mut recovered = Vec::new();
-    for (index, source) in document.source_packages.iter().enumerate() {
-        let package_raw = fs::read_to_string(&source.package_path)
-            .with_context(|| format!("read {}", source.package_path))?;
-        let (_, payload) =
-            preview_bfshare_recovery(&package_raw, source_passwords[index].clone(), None)
-                .await
-                .with_context(|| format!("recover {}", source.package_path))?;
-        recovered.push(payload);
-    }
-    let current_group = group_from_payload(&recovered[0])?;
+    // The current group package comes from the local source profile — there is
+    // no relay backup to recover it from. The workspace pins the source group id
+    // and public key; re-verify the local profile still matches them.
+    let source_payload =
+        profile_to_package_payload(paths, &document.source_profile_id, passphrase)?;
+    let current_group = group_from_payload(&source_payload)?;
     let current_group_id =
         hex::encode(get_group_id(&current_group).context("derive current group id")?);
     let current_group_pk = hex::encode(current_group.group_pk);
     if current_group_id != document.source_group_id {
-        bail!("rotation sources do not match the workspace source group id");
+        bail!("source profile group id no longer matches the rotation workspace");
     }
     if current_group_pk != document.source_group_public_key {
-        bail!("rotation sources do not match the workspace group public key");
-    }
-    for payload in recovered.iter().skip(1) {
-        let candidate = group_from_payload(payload)?;
-        if hex::encode(candidate.group_pk) != current_group_pk {
-            bail!("rotation sources do not share the same group public key");
-        }
-        if hex::encode(get_group_id(&candidate)?) != current_group_id {
-            bail!("rotation sources do not belong to the same current group configuration");
-        }
+        bail!("source profile group public key no longer matches the rotation workspace");
     }
 
-    let shares = recovered
-        .iter()
-        .map(|payload| share_from_payload(&current_group, payload))
-        .collect::<Result<Vec<_>>>()?;
+    // Each source bfshare contributes a share secret; map it to its member index
+    // via the local group package and fail loudly if it is not a member of this
+    // group (mirrors the browser `shareWireFromSecret`). No relay.
+    let mut shares = Vec::with_capacity(document.source_packages.len());
+    let mut seen_idx = HashSet::new();
+    for (index, source) in document.source_packages.iter().enumerate() {
+        let package_raw = fs::read_to_string(&source.package_path)
+            .with_context(|| format!("read {}", source.package_path))?;
+        let decoded = decode_bfshare_package(&package_raw, &source_passwords[index])
+            .map_err(|error| anyhow!("decode {}: {error}", source.package_path))?;
+        let idx = find_member_index_for_share_secret(&current_group, &decoded.share_secret)
+            .with_context(|| {
+                format!(
+                    "source share {} is not a member of the profile group",
+                    source.package_path
+                )
+            })?;
+        if !seen_idx.insert(idx) {
+            bail!(
+                "source package {} duplicates member {idx}",
+                source.package_path
+            );
+        }
+        shares.push(bifrost_core::types::SharePackage {
+            idx,
+            seckey: bifrost_core::secret::SharePrivateKey::new(hex_to_bytes32(
+                &decoded.share_secret,
+            )?),
+        });
+    }
 
     let rotated = rotate_keyset_dealer(
         &current_group,
@@ -472,7 +483,6 @@ pub async fn generate_rotation_workspace(
         ProfileImportResult::ProfileCreated { profile, .. } => profile,
         _ => bail!("rotation did not produce a local profile"),
     };
-    publish_profile_backup(paths, &profile.id, passphrase).await?;
 
     let remote_targets = document
         .targets
@@ -509,7 +519,6 @@ pub async fn generate_rotation_workspace(
             target.label.clone(),
             target.relays.clone(),
         )?;
-        publish_profile_payload_backup(&payload).await?;
         let output_path = target
             .output_path
             .clone()
@@ -564,7 +573,11 @@ pub fn create_generated_keyset_draft(
     threshold: u16,
     count: u16,
 ) -> Result<GeneratedKeysetDraft> {
-    let bundle = create_keyset(CreateKeysetConfig::new(group_name.clone(), threshold, count))
+    let bundle = create_keyset(CreateKeysetConfig::new(
+        group_name.clone(),
+        threshold,
+        count,
+    ))
     .map_err(|error| anyhow!("create keyset: {error}"))?;
     let shares = bundle
         .shares

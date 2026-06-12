@@ -10,7 +10,7 @@ use bifrost_core::types::PolicyOverrideValue;
 use bifrost_profile::{
     ProfilePaths as ShellPaths, export_profile, export_profile_as_bfonboard,
     export_profile_as_bfprofile, export_profile_as_bfshare, import_profile_from_bfprofile_value,
-    import_profile_from_files, publish_profile_backup, recover_profile_from_bfshare_value,
+    import_profile_from_files,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use crossterm::event::{Event, KeyCode, KeyEventKind, read};
@@ -28,11 +28,11 @@ use igloo_shell_core::shell::{
     export_generated_onboarding_package, generate_rotation_workspace, import_generated_share,
     import_profile_from_onboarding_value, inspect_rotation_workspace, list_profiles,
     load_relay_profiles, load_rotation_workspace, load_shell_config, read_daemon_metadata,
-    read_profile, remove_daemon_metadata, remove_profile, remove_relays, replace_relay_profile,
-    run_setup, set_default_relay_profile, set_profile_default_policy_override,
-    set_profile_peer_policy_override, start_profile_daemon, start_profile_daemon_with_passphrase,
-    stop_profile_daemon, stop_profile_daemon_typed, test_relay_connectivity,
-    validate_profile_unlock_with_passphrase,
+    read_profile, recover_group_secret_from_profile_and_shares, remove_daemon_metadata,
+    remove_profile, remove_relays, replace_relay_profile, run_setup, set_default_relay_profile,
+    set_profile_default_policy_override, set_profile_peer_policy_override, start_profile_daemon,
+    start_profile_daemon_with_passphrase, stop_profile_daemon, stop_profile_daemon_typed,
+    test_relay_connectivity, validate_profile_unlock_with_passphrase,
 };
 use nostr::{FromBech32, Keys, PublicKey, SecretKey, ToBech32};
 use serde::Serialize;
@@ -67,7 +67,7 @@ struct TraceArgs {
 enum Commands {
     Import(ImportArgs),
     Export(ExportArgs),
-    Recover(RecoverArgs),
+    RecoverKey(RecoverKeyArgs),
     Onboard(OnboardArgs),
     RotateKey(RotateKeyArgs),
     RotateKeyset {
@@ -119,11 +119,6 @@ enum ProfileCommands {
         profile_id: String,
     },
     Load(LoadArgs),
-    Backup {
-        profile_id: String,
-        #[arg(long)]
-        passphrase_env: Option<String>,
-    },
     Remove {
         profile_id: String,
         #[arg(long)]
@@ -324,22 +319,25 @@ struct ExportArgs {
 }
 
 #[derive(Debug, Args)]
-struct RecoverArgs {
-    bfshare_or_path: String,
+struct RecoverKeyArgs {
+    /// Local profile that supplies the group package and this device's own
+    /// share (unlocked with the profile passphrase).
     #[arg(long)]
-    label: Option<String>,
-    #[arg(long, conflicts_with = "package_secret_file")]
-    package_secret: Option<String>,
-    #[arg(long, conflicts_with = "package_secret")]
-    package_secret_file: Option<String>,
+    profile: String,
+    /// Other members' `bfshare` packages (path or inline). Supply
+    /// `threshold - 1` of them; pair each with a `--bfshare-secret` by order.
+    #[arg(long = "bfshare")]
+    bfshares: Vec<String>,
+    /// Package secret for each `--bfshare`, in the same order.
+    #[arg(long = "bfshare-secret")]
+    bfshare_secrets: Vec<String>,
     #[arg(long, conflicts_with = "passphrase_file")]
     passphrase: Option<String>,
     #[arg(long, conflicts_with = "passphrase")]
     passphrase_file: Option<String>,
-    #[arg(long, conflicts_with = "daemon", conflicts_with = "json")]
-    start: bool,
-    #[arg(long, conflicts_with = "start")]
-    daemon: bool,
+    /// Write the recovered group `nsec` to this file (created at 0o600).
+    #[arg(long)]
+    out: String,
     #[arg(long)]
     json: bool,
 }
@@ -585,7 +583,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Import(args) => commands::imports::handle_import(&paths, args).await?,
         Commands::Export(args) => commands::imports::handle_export(&paths, args)?,
-        Commands::Recover(args) => commands::imports::handle_recover(&paths, args).await?,
+        Commands::RecoverKey(args) => commands::imports::handle_recover_key(&paths, args)?,
         Commands::Onboard(args) => commands::imports::handle_onboard(&paths, args).await?,
         Commands::RotateKey(args) => commands::rotation::handle_rotate_key(&paths, args).await?,
         Commands::RotateKeyset { command } => {
@@ -826,43 +824,48 @@ mod tests {
     }
 
     #[test]
-    fn recover_cli_accepts_start_flag() {
+    fn recover_key_cli_parses() {
         let cli = Cli::try_parse_from([
             "igloo-shell",
-            "recover",
-            "package",
-            "--label",
-            "demo",
-            "--package-secret",
-            "pkg",
+            "recover-key",
+            "--profile",
+            "device-profile",
+            "--bfshare",
+            "/tmp/bob.bfshare",
+            "--bfshare-secret",
+            "bob-secret",
             "--passphrase",
             "passphrase",
-            "--start",
+            "--out",
+            "/tmp/recovered.nsec",
         ])
-        .expect("start flag should parse");
+        .expect("recover-key should parse");
         match cli.command {
-            super::Commands::Recover(args) => assert!(args.start),
+            super::Commands::RecoverKey(args) => {
+                assert_eq!(args.profile, "device-profile");
+                assert_eq!(args.bfshares, vec!["/tmp/bob.bfshare".to_string()]);
+                assert_eq!(args.bfshare_secrets, vec!["bob-secret".to_string()]);
+                assert_eq!(args.out, "/tmp/recovered.nsec");
+            }
             other => panic!("unexpected command: {other:?}"),
         }
     }
 
     #[test]
-    fn recover_cli_rejects_replace_profile_flag() {
+    fn recover_key_cli_rejects_start_flag() {
+        // recover-key reconstructs the group nsec; it never creates a device
+        // profile or daemon, so the legacy --start flow is gone.
         let err = Cli::try_parse_from([
             "igloo-shell",
-            "recover",
-            "package",
-            "--label",
-            "demo",
-            "--package-secret",
-            "pkg",
-            "--passphrase",
-            "passphrase",
-            "--replace-profile",
-            "old-profile",
+            "recover-key",
+            "--profile",
+            "device-profile",
+            "--out",
+            "/tmp/recovered.nsec",
+            "--start",
         ])
         .expect_err("removed flag should fail");
-        assert!(err.to_string().contains("--replace-profile"));
+        assert!(err.to_string().contains("--start"));
     }
 
     #[test]

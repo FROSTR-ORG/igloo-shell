@@ -11,14 +11,6 @@ pub async fn handle_profile(paths: &ShellPaths, command: ProfileCommands) -> Res
             print_json(&profile)
         }
         ProfileCommands::Load(args) => handle_load(paths, args).await,
-        ProfileCommands::Backup {
-            profile_id,
-            passphrase_env,
-        } => {
-            let passphrase = load_passphrase_from_env(passphrase_env)?;
-            let result = publish_profile_backup(paths, &profile_id, passphrase.as_ref()).await?;
-            print_json(&result)
-        }
         ProfileCommands::Remove { profile_id, yes } => {
             if !yes {
                 bail!("profile remove requires --yes");

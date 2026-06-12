@@ -146,13 +146,6 @@ fn profile_commands_cover_list_show_doctor_backup_and_remove() {
         Some(true)
     );
 
-    let backup = harness.backup_profile(&alice_id);
-    assert_eq!(
-        backup.get("profile_id").and_then(Value::as_str),
-        Some(alice_id.as_str())
-    );
-    assert!(backup.get("event_id").and_then(Value::as_str).is_some());
-
     let removed = harness.remove_profile(&alice_id);
     assert_eq!(removed.get("removed").and_then(Value::as_bool), Some(true));
     assert_eq!(
