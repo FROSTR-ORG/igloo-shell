@@ -22,7 +22,6 @@ use frostr_utils::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::Digest;
 use tokio_tungstenite::connect_async;
 
 use bifrost_app::native_runtime::DaemonMetadata;

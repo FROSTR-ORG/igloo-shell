@@ -824,6 +824,16 @@ impl TestHarness {
         command.env("XDG_CONFIG_HOME", self.config_home());
         command.env("XDG_DATA_HOME", self.data_home());
         command.env("XDG_STATE_HOME", self.state_home());
+        // Test-only: pin a short, hermetic XDG_RUNTIME_DIR so the daemon control
+        // socket fits the `sun_path` limit no matter how deep the per-test temp
+        // root is (macOS `$TMPDIR` under /var/folders blows past it on its own).
+        // We use /tmp rather than `state_home()` precisely because the latter is
+        // the over-long path. The production secure shortener
+        // (bifrost_app::native_runtime) would otherwise relocate to
+        // ~/.igloo-shell/run, which we keep out of the test run.
+        let runtime_dir = PathBuf::from("/tmp").join(format!("igsr-{}", self.tag));
+        let _ = fs::create_dir_all(&runtime_dir);
+        command.env("XDG_RUNTIME_DIR", &runtime_dir);
         // Test-only: opt the spawned CLI (and the daemon it spawns, which inherits
         // this env) into bifrost-rs's debug-build fast-KDF path so each managed
         // integration test doesn't pay the production 256 MiB Argon2id cost twice.

@@ -1,5 +1,6 @@
 use super::*;
 use nostr::ToBech32;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub(crate) fn profile_to_package_payload(
     paths: &ShellPaths,
@@ -54,12 +55,24 @@ pub(crate) fn rotation_payload_from_share(
 
 /// Recovered group secret-key material. The signing key is reconstructed from a
 /// threshold of shares and never persisted by this crate; the caller decides
-/// how to surface it (the shell CLI writes the `nsec` to a `0o600` file).
-#[derive(Debug, Clone)]
+/// how to surface it (the shell CLI writes the `nsec` to a `0o600` file). The
+/// secret fields are zeroized on drop and redacted in `Debug`.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct RecoveredGroupKey {
     pub nsec: String,
     pub signing_key_hex: String,
+    #[zeroize(skip)]
     pub group_public_key: String,
+}
+
+impl std::fmt::Debug for RecoveredGroupKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecoveredGroupKey")
+            .field("nsec", &"<redacted>")
+            .field("signing_key_hex", &"<redacted>")
+            .field("group_public_key", &self.group_public_key)
+            .finish()
+    }
 }
 
 /// Reconstruct the group secret key (nsec) from a threshold of shares, fully
