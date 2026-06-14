@@ -21,5 +21,6 @@ pub fn policy_value(value: CliPolicyValue) -> PolicyOverrideValue {
         CliPolicyValue::Unset => PolicyOverrideValue::Unset,
         CliPolicyValue::Allow => PolicyOverrideValue::Allow,
         CliPolicyValue::Deny => PolicyOverrideValue::Deny,
+        CliPolicyValue::Ask => PolicyOverrideValue::Ask,
     }
 }

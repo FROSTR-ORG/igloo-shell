@@ -82,6 +82,46 @@ fn live_policy_commands_persist_and_update_runtime() {
     assert_eq!(updated.get("persisted"), Some(&Value::Bool(true)));
     assert!(updated.get("result").is_some());
 
+    // The `ask` disposition (interactive approval) round-trips through the CLI,
+    // daemon, and persisted manifest like allow/deny.
+    let asked = harness.run_json(&[
+        "policy",
+        "set-peer-override",
+        "--profile",
+        &alice_id,
+        &peer,
+        "--direction",
+        "respond",
+        "--method",
+        "sign",
+        "--value",
+        "ask",
+    ]);
+    assert_eq!(asked.get("updated"), Some(&Value::Bool(true)));
+    let asked_manifest = harness.run_json(&["profile", "show", &alice_id]);
+    let asked_value = asked_manifest
+        .get("policy_overrides")
+        .and_then(|value| value.get("peer_overrides"))
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|entry| entry.get("policy_override"))
+        .and_then(|policy| policy.get("respond"))
+        .and_then(|respond| respond.get("sign"))
+        .and_then(Value::as_str);
+    assert_eq!(asked_value, Some("ask"));
+
+    // Resolving an unknown approval id is a no-op success (the signer drops it).
+    let resolved = harness.run_json(&[
+        "runtime",
+        "resolve-approval",
+        "--profile",
+        &alice_id,
+        "no-such-approval",
+        "--approved",
+        "true",
+    ]);
+    assert_eq!(resolved.get("updated"), Some(&Value::Bool(true)));
+
     let cleared = harness.run_json(&["policy", "clear-peer", "--profile", &alice_id, &peer]);
     assert_eq!(cleared.get("updated"), Some(&Value::Bool(true)));
     let manifest = harness.run_json(&["profile", "show", &alice_id]);

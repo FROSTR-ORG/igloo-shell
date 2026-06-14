@@ -126,6 +126,14 @@ pub async fn handle_runtime(paths: &ShellPaths, command: RuntimeCommands) -> Res
             let result = daemon_wipe_state(paths, &profile).await?;
             print_json(&result)
         }
+        RuntimeCommands::ResolveApproval {
+            profile,
+            request_id,
+            approved,
+        } => {
+            let result = daemon_resolve_approval(paths, &profile, request_id, approved).await?;
+            print_json(&result)
+        }
     }
 }
 

@@ -22,17 +22,18 @@ use igloo_shell_core::shell::{
 use igloo_shell_core::shell::{
     apply_rotation_update_from_bfonboard_value, check_profile_runtime, clear_profile_peer_policy,
     create_generated_keyset_draft, create_rotation_workspace, daemon_ecdh, daemon_log_path,
-    daemon_onboard, daemon_peer_status, daemon_ping, daemon_runtime_diagnostics,
-    daemon_runtime_metadata, daemon_runtime_status, daemon_set_policy_override, daemon_sign,
-    daemon_wipe_state, default_rotation_workspace_path, doctor_profile,
-    export_generated_onboarding_package, generate_rotation_workspace, import_generated_share,
-    import_profile_from_onboarding_value, inspect_rotation_workspace, list_profiles,
-    load_relay_profiles, load_rotation_workspace, load_shell_config, read_daemon_metadata,
-    read_profile, recover_group_secret_from_profile_and_shares, remove_daemon_metadata,
-    remove_profile, remove_relays, replace_relay_profile, run_setup, set_default_relay_profile,
-    set_profile_default_policy_override, set_profile_peer_policy_override, start_profile_daemon,
-    start_profile_daemon_with_passphrase, stop_profile_daemon, stop_profile_daemon_typed,
-    test_relay_connectivity, validate_profile_unlock_with_passphrase,
+    daemon_onboard, daemon_peer_status, daemon_ping, daemon_resolve_approval,
+    daemon_runtime_diagnostics, daemon_runtime_metadata, daemon_runtime_status,
+    daemon_set_policy_override, daemon_sign, daemon_wipe_state, default_rotation_workspace_path,
+    doctor_profile, export_generated_onboarding_package, generate_rotation_workspace,
+    import_generated_share, import_profile_from_onboarding_value, inspect_rotation_workspace,
+    list_profiles, load_relay_profiles, load_rotation_workspace, load_shell_config,
+    read_daemon_metadata, read_profile, recover_group_secret_from_profile_and_shares,
+    remove_daemon_metadata, remove_profile, remove_relays, replace_relay_profile, run_setup,
+    set_default_relay_profile, set_profile_default_policy_override,
+    set_profile_peer_policy_override, start_profile_daemon, start_profile_daemon_with_passphrase,
+    stop_profile_daemon, stop_profile_daemon_typed, test_relay_connectivity,
+    validate_profile_unlock_with_passphrase,
 };
 use nostr::{FromBech32, Keys, PublicKey, SecretKey, ToBech32};
 use serde::Serialize;
@@ -201,6 +202,16 @@ enum RuntimeCommands {
         profile: String,
         #[arg(long)]
         yes: bool,
+    },
+    /// Resolve a parked approval (the `ask` policy disposition). Read pending
+    /// request ids from `runtime status` (the `pending_approvals` field).
+    ResolveApproval {
+        #[arg(long)]
+        profile: String,
+        request_id: String,
+        /// `true` approves (replays the request); `false` denies it.
+        #[arg(long, action = clap::ArgAction::Set)]
+        approved: bool,
     },
 }
 
@@ -519,6 +530,7 @@ enum CliPolicyValue {
     Unset,
     Allow,
     Deny,
+    Ask,
 }
 
 #[derive(Debug, Args)]

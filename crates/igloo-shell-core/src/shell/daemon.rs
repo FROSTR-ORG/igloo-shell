@@ -379,3 +379,15 @@ pub async fn daemon_clear_peer_policy_overrides(
         .clear_peer_policy_overrides()
         .await
 }
+
+#[cfg(unix)]
+pub async fn daemon_resolve_approval(
+    paths: &ShellPaths,
+    profile_id: &str,
+    request_id: String,
+    approved: bool,
+) -> Result<UpdatedPayload> {
+    daemon_client(paths, profile_id)?
+        .resolve_approval(request_id, approved)
+        .await
+}

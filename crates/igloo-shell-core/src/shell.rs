@@ -65,11 +65,12 @@ pub use config::{
 };
 pub use daemon::{
     build_daemon_transport, daemon_clear_peer_policy_overrides, daemon_client, daemon_ecdh,
-    daemon_log_path, daemon_onboard, daemon_peer_status, daemon_ping, daemon_runtime_config,
-    daemon_runtime_diagnostics, daemon_runtime_metadata, daemon_runtime_readiness,
-    daemon_runtime_status, daemon_set_policy_override, daemon_sign, daemon_wipe_state,
-    resolve_profile_runtime, resolve_profile_runtime_for_passphrase, start_profile_daemon,
-    start_profile_daemon_with_passphrase, stop_profile_daemon, stop_profile_daemon_typed,
+    daemon_log_path, daemon_onboard, daemon_peer_status, daemon_ping, daemon_resolve_approval,
+    daemon_runtime_config, daemon_runtime_diagnostics, daemon_runtime_metadata,
+    daemon_runtime_readiness, daemon_runtime_status, daemon_set_policy_override, daemon_sign,
+    daemon_wipe_state, resolve_profile_runtime, resolve_profile_runtime_for_passphrase,
+    start_profile_daemon, start_profile_daemon_with_passphrase, stop_profile_daemon,
+    stop_profile_daemon_typed,
 };
 pub(crate) use encrypted_profile::{
     decrypt_encrypted_profile, load_share_payload, load_share_payload_with_passphrase,
@@ -332,11 +333,17 @@ mod tests {
                 outgoing_available: 2,
                 outgoing_spent: 0,
                 can_sign: true,
+                can_ecdh: true,
+                can_ping: true,
                 should_send_nonces: false,
+                last_response_latency_ms: None,
+                avg_latency_ms: None,
+                nonce_history: Vec::new(),
             }],
             peer_permission_states: Vec::new(),
             pending_operations: Vec::new(),
             onboarding_statuses: Vec::new(),
+            pending_approvals: Vec::new(),
         }
     }
 
