@@ -344,6 +344,10 @@ mod tests {
             pending_operations: Vec::new(),
             onboarding_statuses: Vec::new(),
             pending_approvals: Vec::new(),
+            last_sign_failure: None,
+            connected_relays: None,
+            configured_relays: None,
+            last_load_error: None,
         }
     }
 
