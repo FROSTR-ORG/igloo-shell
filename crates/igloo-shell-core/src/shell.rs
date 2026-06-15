@@ -295,6 +295,21 @@ mod tests {
         ShellPaths::from_roots(root.join("config"), root.join("data"), root.join("state"))
     }
 
+    // Bind fake-daemon control sockets under a short, unique /tmp root: the deep
+    // ShellPaths nesting under $TMPDIR (macOS `/var/folders/...`) blows the
+    // `sun_path` limit (104 on macOS). The socket path is test-only — it's written
+    // verbatim into daemon metadata and read back, not derived from ShellPaths — so
+    // a short path is transparent to the helpers under test. (Production sockets use
+    // the secure shortener and never /tmp; tests don't need that constraint, mirroring
+    // igloo-shell-cli/tests/support.)
+    #[cfg(unix)]
+    fn short_socket_path(file: &str) -> std::path::PathBuf {
+        let dir = std::path::PathBuf::from("/tmp")
+            .join(format!("igs-{}", TEST_COUNTER.fetch_add(1, Ordering::Relaxed)));
+        fs::create_dir_all(&dir).expect("create short socket dir");
+        dir.join(file)
+    }
+
     #[cfg(unix)]
     fn sample_runtime_status() -> RuntimeStatusSummary {
         RuntimeStatusSummary {
@@ -476,7 +491,7 @@ mod tests {
         let status = sample_runtime_status();
         let config = DeviceConfig::default();
 
-        let status_socket = paths.profile_state_dir(profile_id).join("status.sock");
+        let status_socket = short_socket_path("status.sock");
         write_test_daemon_metadata(&paths, profile_id, &status_socket, token);
         let worker = spawn_fake_daemon_once(
             status_socket.clone(),
@@ -491,7 +506,7 @@ mod tests {
         assert_eq!(decoded.metadata.share_public_key, "share-pubkey");
         worker.await.expect("join status worker");
 
-        let diagnostics_socket = paths.profile_state_dir(profile_id).join("diagnostics.sock");
+        let diagnostics_socket = short_socket_path("diagnostics.sock");
         write_test_daemon_metadata(&paths, profile_id, &diagnostics_socket, token);
         let worker = spawn_fake_daemon_once(
             diagnostics_socket.clone(),
@@ -512,7 +527,7 @@ mod tests {
         );
         worker.await.expect("join diagnostics worker");
 
-        let metadata_socket = paths.profile_state_dir(profile_id).join("metadata.sock");
+        let metadata_socket = short_socket_path("metadata.sock");
         write_test_daemon_metadata(&paths, profile_id, &metadata_socket, token);
         let worker = spawn_fake_daemon_once(
             metadata_socket.clone(),
@@ -527,7 +542,7 @@ mod tests {
         assert_eq!(metadata.share_public_key, "share-pubkey");
         worker.await.expect("join metadata worker");
 
-        let readiness_socket = paths.profile_state_dir(profile_id).join("readiness.sock");
+        let readiness_socket = short_socket_path("readiness.sock");
         write_test_daemon_metadata(&paths, profile_id, &readiness_socket, token);
         let worker = spawn_fake_daemon_once(
             readiness_socket.clone(),
@@ -542,7 +557,7 @@ mod tests {
         assert!(readiness.sign_ready);
         worker.await.expect("join readiness worker");
 
-        let peers_socket = paths.profile_state_dir(profile_id).join("peers.sock");
+        let peers_socket = short_socket_path("peers.sock");
         write_test_daemon_metadata(&paths, profile_id, &peers_socket, token);
         let worker = spawn_fake_daemon_once(
             peers_socket.clone(),
@@ -558,7 +573,7 @@ mod tests {
         assert_eq!(peers[0].pubkey, "peer-1");
         worker.await.expect("join peer worker");
 
-        let config_socket = paths.profile_state_dir(profile_id).join("config.sock");
+        let config_socket = short_socket_path("config.sock");
         write_test_daemon_metadata(&paths, profile_id, &config_socket, token);
         let worker = spawn_fake_daemon_once(
             config_socket.clone(),
@@ -573,7 +588,7 @@ mod tests {
         assert_eq!(decoded_config.request_ttl_secs, config.request_ttl_secs);
         worker.await.expect("join config worker");
 
-        let shutdown_socket = paths.profile_state_dir(profile_id).join("shutdown.sock");
+        let shutdown_socket = short_socket_path("shutdown.sock");
         write_test_daemon_metadata(&paths, profile_id, &shutdown_socket, token);
         let worker = spawn_fake_daemon_once(
             shutdown_socket.clone(),
@@ -601,7 +616,7 @@ mod tests {
         let token = "ab".repeat(32);
         let token = token.as_str();
 
-        let sign_socket = paths.profile_state_dir(profile_id).join("sign.sock");
+        let sign_socket = short_socket_path("sign.sock");
         write_test_daemon_metadata(&paths, profile_id, &sign_socket, token);
         let worker = spawn_fake_daemon_once(
             sign_socket.clone(),
@@ -623,7 +638,7 @@ mod tests {
         assert_eq!(sign.request_id, "req-sign");
         worker.await.expect("join sign worker");
 
-        let ecdh_socket = paths.profile_state_dir(profile_id).join("ecdh.sock");
+        let ecdh_socket = short_socket_path("ecdh.sock");
         write_test_daemon_metadata(&paths, profile_id, &ecdh_socket, token);
         let worker = spawn_fake_daemon_once(
             ecdh_socket.clone(),
@@ -645,7 +660,7 @@ mod tests {
         assert_eq!(ecdh.shared_secret_hex32, "bb".repeat(32));
         worker.await.expect("join ecdh worker");
 
-        let ping_socket = paths.profile_state_dir(profile_id).join("ping.sock");
+        let ping_socket = short_socket_path("ping.sock");
         write_test_daemon_metadata(&paths, profile_id, &ping_socket, token);
         let worker = spawn_fake_daemon_once(
             ping_socket.clone(),
@@ -667,7 +682,7 @@ mod tests {
         assert_eq!(ping.peer, "peer-1");
         worker.await.expect("join ping worker");
 
-        let onboard_socket = paths.profile_state_dir(profile_id).join("onboard.sock");
+        let onboard_socket = short_socket_path("onboard.sock");
         write_test_daemon_metadata(&paths, profile_id, &onboard_socket, token);
         let worker = spawn_fake_daemon_once(
             onboard_socket.clone(),
@@ -689,7 +704,7 @@ mod tests {
         assert_eq!(onboard.group_member_count, 2);
         worker.await.expect("join onboard worker");
 
-        let wipe_socket = paths.profile_state_dir(profile_id).join("wipe.sock");
+        let wipe_socket = short_socket_path("wipe.sock");
         write_test_daemon_metadata(&paths, profile_id, &wipe_socket, token);
         let worker = spawn_fake_daemon_once(
             wipe_socket.clone(),
@@ -704,7 +719,7 @@ mod tests {
         assert!(wipe.wiped);
         worker.await.expect("join wipe worker");
 
-        let policy_socket = paths.profile_state_dir(profile_id).join("policy.sock");
+        let policy_socket = short_socket_path("policy.sock");
         write_test_daemon_metadata(&paths, profile_id, &policy_socket, token);
         let policy_override = PeerPolicyOverride::default();
         let worker = spawn_fake_daemon_once(
@@ -754,7 +769,7 @@ mod tests {
         fs::create_dir_all(paths.profile_state_dir(&profile.id)).expect("create state dir");
         write_profile(&paths, &profile).expect("write profile");
 
-        let socket_path = paths.profile_state_dir(&profile.id).join("runtime.sock");
+        let socket_path = short_socket_path("runtime.sock");
         let hex_token: String = "ab".repeat(32);
         write_test_daemon_metadata(&paths, &profile.id, &socket_path, &hex_token);
         let worker = spawn_fake_daemon_once(
