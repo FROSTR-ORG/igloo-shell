@@ -304,8 +304,10 @@ mod tests {
     // igloo-shell-cli/tests/support.)
     #[cfg(unix)]
     fn short_socket_path(file: &str) -> std::path::PathBuf {
-        let dir = std::path::PathBuf::from("/tmp")
-            .join(format!("igs-{}", TEST_COUNTER.fetch_add(1, Ordering::Relaxed)));
+        let dir = std::path::PathBuf::from("/tmp").join(format!(
+            "igs-{}",
+            TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
         fs::create_dir_all(&dir).expect("create short socket dir");
         dir.join(file)
     }
